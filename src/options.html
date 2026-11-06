@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>The Eyes of Argus</title>
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <header>
+    <img src="icons/icon128.png" alt="">
+    <div>
+      <h1>The Eyes of Argus</h1>
+      <p class="muted">Mark YouTube channels that use AI or are owned by private equity.</p>
+    </div>
+  </header>
+
+  <main>
+    <section class="card">
+      <h2>Display</h2>
+      <label class="row">
+        <span><b>Show badges</b><small>Adds an <i class="tag ai">AI</i> / <i class="tag pe">PE</i> tag next to channel names</small></span>
+        <input type="checkbox" class="switch" data-setting="badges">
+      </label>
+      <label class="row">
+        <span><b>Color channel names</b><small>Tints the names of marked channels</small></span>
+        <input type="checkbox" class="switch" data-setting="tint">
+      </label>
+      <label class="row">
+        <span><b>Fade marked videos</b><small>Greys out videos from marked channels (hover to see them)</small></span>
+        <input type="checkbox" class="switch" data-setting="dim">
+      </label>
+    </section>
+
+    <section class="card" id="sync">
+      <h2>Community sync <span id="syncPill" class="pill">Off</span></h2>
+      <p class="muted">Share your marks as anonymous votes and see what everyone else marked. A mark shows for everyone once enough people agree. Votes you make offline are sent the next time you're online, and the last community list keeps working offline.</p>
+      <label class="row">
+        <span><b>Enable community sync</b><small>No account. Your install gets a random anonymous ID.</small></span>
+        <input type="checkbox" class="switch" id="syncEnabled">
+      </label>
+      <div class="inline">
+        <input id="syncServer" type="url" placeholder="https://eyes-of-argus.yourname.workers.dev">
+        <button id="syncNow">Sync now</button>
+      </div>
+      <p id="syncStatus" class="muted"></p>
+    </section>
+
+    <section class="card">
+      <div class="head">
+        <h2>Your marks <span id="count" class="pill">0</span></h2>
+        <input id="search" type="search" placeholder="Search…">
+      </div>
+      <table id="marks">
+        <thead><tr><th>Channel</th><th>AI</th><th>PE</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <p class="muted small">AI / PE: <b>Yes</b> = you say it is, <b>Not</b> = you disagree (hides community and shared marks for you), <b>–</b> = no opinion.</p>
+      <p id="empty" class="muted">No marks yet. On YouTube, right-click a channel name or video → <b>The Eyes of Argus</b>.</p>
+    </section>
+
+    <section class="card">
+      <h2>Shared list</h2>
+      <p class="muted">Subscribe to a list someone maintains: any file exported from this extension, hosted anywhere (for example a GitHub repo). It updates twice a day when you're online. Offline, the last copy is used. Your own marks always win.</p>
+      <div class="inline">
+        <input id="listUrl" type="url" placeholder="https://raw.githubusercontent.com/you/argus-list/main/argus.json">
+        <button id="saveList">Save &amp; update</button>
+      </div>
+      <p id="listStatus" class="muted"></p>
+    </section>
+
+    <section class="card">
+      <h2>Backup &amp; sharing</h2>
+      <p class="muted">Export your marks to share them or keep a backup. Importing merges into what you already have.</p>
+      <div class="inline">
+        <button id="export">Export marks</button>
+        <button id="importBtn">Import…</button>
+        <input type="file" id="importFile" accept=".json,application/json" hidden>
+        <span class="grow"></span>
+        <button id="wipe" class="danger">Delete all marks</button>
+      </div>
+      <p id="ioStatus" class="muted"></p>
+    </section>
+
+    <section class="card" id="help">
+      <h2>Help</h2>
+      <ol>
+        <li>On YouTube, <b>right-click</b> a channel name, a video, or anywhere on a video or channel page.</li>
+        <li>Choose <b>The Eyes of Argus → Mark as AI channel</b> or <b>Mark as private-equity owned</b>. A channel can have both.</li>
+        <li>Marked channels get a badge everywhere they appear. Use <b>Clear</b> to remove a mark.</li>
+        <li>If you think a community mark is wrong, choose <b>Not AI</b> or <b>Not PE-owned</b>. That hides it for you and counts as a vote against it.</li>
+      </ol>
+      <p class="muted"><b>Nothing shows up?</b> Reload YouTube tabs that were open before the extension was installed. Some places, like parts of the watch-page sidebar, show the channel name without a link. Right-click the video's thumbnail or open the video instead.</p>
+      <p class="muted"><b>Privacy:</b> your marks never leave your browser unless you export them. With community sync on, only your votes (channel, flag, yes/no) and an anonymous ID are sent to the sync server you set. Everyone downloads the same full list, so the server never learns which videos you watch.</p>
+    </section>
+  </main>
+
+  <script src="options.js"></script>
+</body>
+</html>
