@@ -55,11 +55,9 @@
    */
   function requestAccess(origin, sendsData) {
     const origins = [origin + '/*'];
-    const request = IS_FIREFOX && sendsData
-      ? api.permissions.request({ origins, data_collection: ['websiteActivity'] })
-        .catch(() => api.permissions.request({ origins }))
-      : api.permissions.request({ origins });
-    return request.catch(() => false);
+    // No retry on failure: a second prompt would no longer be inside the click.
+    const perms = IS_FIREFOX && sendsData ? { origins, data_collection: ['websiteActivity'] } : { origins };
+    return api.permissions.request(perms).catch(() => false);
   }
 
   /** @param {number|undefined} t @returns {string} */
@@ -151,7 +149,7 @@
     $('#syncPill').textContent = syncCfg.enabled ? 'On' : 'Off';
     $('#syncPill').classList.toggle('on', syncCfg.enabled);
     if (!syncCfg.enabled) {
-      const extra = d.pendingForget ? ' Your votes will be deleted from the server the next time you\'re online.' : '';
+      const extra = d.pendingForget?.length ? ' Your votes will be deleted from the server the next time you\'re online.' : '';
       return setStatus($('#syncStatus'), 'Sync is off. Your marks stay on this computer.' + extra);
     }
     const queued = Object.keys(d.queue || {}).length;
@@ -264,7 +262,7 @@
       if (!ai && !pe) continue;
       const name = v.name || k;
       if (ai > 0 || pe > 0) channels[k] = { ai: ai > 0, pe: pe > 0, name };
-      mine[k] = { ai, pe, name, ...(v.uc ? { uc: v.uc } : {}) };
+      mine[k] = { ai, pe, name, ...(v.uc ? { uc: v.uc } : {}), ...(v.src ? { src: v.src } : {}) };
     }
     return { app: 'eyes-of-argus', version: 2, exported: new Date().toISOString(), channels, mine };
   }

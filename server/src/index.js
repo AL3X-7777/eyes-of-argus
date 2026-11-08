@@ -178,7 +178,7 @@ async function snapshot(req, env, ctx) {
     const obj = await env.BUCKET.get(SNAPSHOT);
     if (!obj) return json({ v: 1, generated: 0, c: {} }, 200, CORS_GET);
     res = new Response(obj.body, {
-      headers: { 'content-type': 'application/json', etag: obj.httpEtag, 'cache-control': 'public, max-age=300', ...CORS_GET },
+      headers: { 'content-type': 'application/json', etag: obj.httpEtag, 'cache-control': 'public, max-age=60', ...CORS_GET },
     });
     if (cache) ctx.waitUntil(cache.put(cacheKey, res.clone()));
   }
@@ -208,7 +208,7 @@ async function rebuild(env) {
   const c = cfg(env);
   const now = Date.now();
   await env.DB.prepare('DELETE FROM limits WHERE day < ?').bind(today()).run();
-  const { results: dirty } = await env.DB.prepare('SELECT key, rev FROM channels WHERE dirty = 1 LIMIT ?').bind(c.maxPerRun).all();
+  const { results: dirty } = await env.DB.prepare('SELECT key, rev FROM channels WHERE dirty = 1 ORDER BY updated_at LIMIT ?').bind(c.maxPerRun).all();
   if (!dirty.length) return { changed: 0 };
 
   const obj = await env.BUCKET.get(SNAPSHOT);
@@ -228,7 +228,7 @@ async function rebuild(env) {
                   ROW_NUMBER() OVER (PARTITION BY v.channel_key, v.flag, COALESCE(u.reg_net, u.id) ORDER BY u.created_at) AS rn
            FROM votes v JOIN users u ON u.id = v.user_id
            WHERE v.channel_key IN (${ph}))
-         SELECT k, f, COUNT(*) AS n,
+         SELECT k, f, COUNT(*) AS n, SUM(CASE WHEN w = 0 THEN 1 ELSE 0 END) AS young,
                 SUM(CASE WHEN val > 0 AND rn <= ?2 THEN w ELSE 0 END) AS up,
                 SUM(CASE WHEN val < 0 AND rn <= ?2 THEN w ELSE 0 END) AS down
          FROM ranked GROUP BY k, f`
@@ -244,7 +244,10 @@ async function rebuild(env) {
     for (const { key, rev } of part) {
       const s = score(t[key], ov[key], nm[key], c);
       if (s.entry) snap.c[key] = s.entry; else delete snap.c[key];
-      updates.push({ key, rev, raw: s.raw, remove: s.total === 0 && !ov[key] });
+      // Votes from installs still in their warm-up count later: keep those channels dirty
+      // so they are recounted once the installs are old enough.
+      const young = A.FLAGS.some(f => t[key]?.[f]?.young > 0);
+      updates.push({ key, rev, raw: s.raw, young, remove: s.total === 0 && !ov[key] });
     }
   }
 
@@ -263,8 +266,8 @@ async function rebuild(env) {
     await env.DB.batch(part.map(u => (u.remove
       ? env.DB.prepare('DELETE FROM channels WHERE key = ? AND rev = ?').bind(u.key, u.rev)
       : env.DB.prepare(
-        'UPDATE channels SET ai_pct = ?, ai_n = ?, pe_pct = ?, pe_n = ?, dirty = 0, updated_at = ? WHERE key = ? AND rev = ?'
-      ).bind(u.raw.ai.pct, u.raw.ai.n, u.raw.pe.pct, u.raw.pe.n, now, u.key, u.rev))));
+        'UPDATE channels SET ai_pct = ?, ai_n = ?, pe_pct = ?, pe_n = ?, dirty = ?, updated_at = ? WHERE key = ? AND rev = ?'
+      ).bind(u.raw.ai.pct, u.raw.ai.n, u.raw.pe.pct, u.raw.pe.n, u.young ? 1 : 0, now, u.key, u.rev))));
   }
   return { changed: dirty.length, total: Object.keys(snap.c).length };
 }

@@ -53,7 +53,7 @@ test('votes are counted with weights, thresholds and overrides', async () => {
   const r = await post('/admin/rebuild', {}, { authorization: 'Bearer test-admin' });
   assert.equal(r.status, 200);
   const c = await snapshot();
-  assert.deepEqual(c['@slop'], [100, 3, 0, 0, 'Slop']);
+  assert.deepEqual(c['@slop'], [100, 2, 0, 0, 'Slop'], 'N10: 3 votes from one network, 2 count');
   assert.equal(c['@split'], undefined, '1 yes / 1 no stays hidden');
 
   srv.sql("INSERT INTO overrides VALUES ('@slop', 0, NULL, 'test')");
@@ -134,4 +134,14 @@ test('F5: a rejected vote batch is dropped and the community list still download
   assert.ok(r.ok, JSON.stringify(r));
   assert.deepEqual(storage.data.queue, {});
   assert.ok(storage.data.communityMeta);
+});
+
+test('N1: votes from new installs are counted once their warm-up ends, without new votes', async () => {
+  const a = await newUser(), b = await newUser();
+  for (const s of [a, b]) await post('/votes', { secret: s, votes: [{ k: '@warmup', f: 'ai', v: 1 }] });
+  await recount();
+  assert.equal((await snapshot())['@warmup'], undefined, 'still warming up');
+  srv.sql('UPDATE users SET created_at = 0'); // time passes
+  await recount();
+  assert.deepEqual((await snapshot())['@warmup'], [100, 2, 0, 0, '']);
 });

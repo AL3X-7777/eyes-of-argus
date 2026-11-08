@@ -68,3 +68,34 @@ Nobody independent has checked this estimate; a second agent review was skipped 
 - rescanning only the changed parts of the page;
 - an approval step for newly shown community marks, or a threshold that scales with the number of voters;
 - a test in real Firefox and Chrome on live YouTube.
+
+---
+
+# Second review: v0.3.0 → v0.3.1
+
+A second, independent review agent checked v0.3.0. It confirmed the earlier fixes hold, but scored the code
+**76/100**, lower than my own estimate of about 86. It also found 12 new issues, all fixed in v0.3.1:
+
+| # | Problem | Fix |
+|---|---|---|
+| N1 (High) | Votes from new installs were never recounted after their warm-up, so community marks would almost never appear at launch | Channels with warm-up votes stay queued for recounting |
+| N2 | A channel from an imported list stayed "not your vote" even after you marked it yourself | Your own change removes the import tag |
+| N3 | Turning sync off during the first registration could still upload votes | A generation counter stops running uploads; deletion is queued even before registration finishes |
+| N4 | Backups dropped the import tag, so re-importing turned other people's lists into your votes | Tag exported and respected on import |
+| N5 | The replace flag could be cleared by an older sync | Cleared only by the sync that matches it (token) |
+| N6 | Changing server left your votes on the old one, under the same ID | Old server gets a delete request; new server gets a new anonymous ID |
+| N7 | Votes made offline could wait up to 6 hours | Retry every 5 minutes while anything is waiting, and on browser start |
+| N8 | Edge cache could serve an old list for 5 minutes | Cache time cut to 60 seconds |
+| N9 | YouTube tabs could send settings-level messages | Tabs may only send marks |
+| N10 | Hover text mixed weighted % with a raw vote count | Count shows only votes that counted |
+| N11 | A second permission prompt after a refusal could never work in Firefox | Removed |
+| N12 | Recount size not capped; odd IPv6 addresses shared one rate-limit bucket | Capped at 1,800; own bucket each |
+
+**Results:** 30 tests pass, including 4 new ones for N1, N2/N4, N3/N6 and N9. ESLint and Mozilla's add-on linter report no problems.
+
+**Still open:**
+- automated tests for the settings page UI;
+- a smoke test of the Chromium build in a real browser;
+- rescanning only the changed parts of the page.
+
+The reviewer estimated about +10 points for these fixes, which would put the code in the mid-80s. That figure hasn't been checked by a third review.

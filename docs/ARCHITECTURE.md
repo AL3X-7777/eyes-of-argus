@@ -35,11 +35,11 @@ Display priority for each flag: **your mark** (yes / not) → **shared list** �
 |---|---|
 | `marks` | `{ "@handle" or "UC…": {ai, pe, name, uc?, t, src?} }`, where ai/pe are 1 = yes, -1 = not, 0 = none (`true` from v0.1 still means yes); `src: "import"` = came from someone else's list |
 | `queue` | `{ "key|flag": {k, f, v, name, t} }` votes waiting to be sent (latest wins) |
-| `syncReplace` | true → the next upload replaces all of this install's votes on the server |
-| `sync` | `{enabled, server}` |
+| `syncReplace` | non-zero token → the next upload replaces all of this install's votes on the server |
+| `sync` | `{enabled, server, gen}`; `gen` changes on every on/off/server change and stops uploads already running |
 | `identity` | `{secret, id, registeredAt}`; the server only ever sees `secret` over HTTPS and stores `sha256(secret)` |
 | `powProgress` | `{id, bits, next}` saved puzzle progress |
-| `pendingForget` | `{server, secret}` "delete my votes" still to be sent |
+| `pendingForget` | `[{server, secret}]` "delete my votes" requests still to be sent (retried every 5 min) |
 | `community` / `communityMeta` | the community list / its ETag, count and times (kept apart so a "no change" check doesn't make tabs reload the list) |
 | `syncStatus` | result of the last sync (`sent`, `count`, `uploadError`, `downloadError`) |
 | `sharedList`, `listUrl` | subscribed shared list and its address |
@@ -57,7 +57,7 @@ Display priority for each flag: **your mark** (yes / not) → **shared list** �
 | `argus-sync-now` | options → background | none | sync status |
 | `argus-update-list` | options → background | none | `{ok, count}` |
 
-The background only answers messages from its own extension (`sender.id`).
+The background only answers messages from its own extension (`sender.id`). YouTube tabs may only send `argus-mark`.
 
 ## File formats
 
@@ -80,7 +80,7 @@ adds "yes" where you have no opinion and is **not** sent as your votes.
   "c": { "@x": [92, 41, 0, 0, "X"], "UC…": [100, 0, 0, 0, "Y", 1] } }
 ```
 
-Each entry is `[aiPct, aiVotes, pePct, peVotes, name, overrideBits?]`. A pct of 0 means not shown.
+Each entry is `[aiPct, aiVotes, pePct, peVotes, name, overrideBits?]`. The vote counts include only votes that counted (weighted, network cap applied). A pct of 0 means not shown.
 In `overrideBits`, 1 means AI was set by the admin and 2 means PE was.
 
 ## Server API
@@ -98,7 +98,7 @@ All POSTs require `content-type: application/json` and a body of 64 KB or less. 
 
 ## Tests and tooling
 
-`npm test` runs 26 tests: content script, background, server end-to-end against a real local
+`npm test` runs 30 tests: content script, background, server end-to-end against a real local
 `wrangler dev`, and regression tests for every review finding. `npm run lint` runs ESLint and
 web-ext lint. `npm run docs` generates the API reference. `.github/workflows/ci.yml` runs build,
 lint and tests on every push.

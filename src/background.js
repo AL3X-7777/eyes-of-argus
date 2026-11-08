@@ -49,6 +49,7 @@ const SHARED_ALARM = 'argus-shared';    // periodic: refresh the subscribed shar
 const SYNC_PERIOD_MIN = 6 * 60;
 const SHARED_PERIOD_MIN = 12 * 60;
 const FLUSH_DELAY_MS = 5000;
+const RETRY_MIN = 5;                    // retry interval while votes or deletions are waiting
 
 // ---------------------------------------------------------------------------
 // Serialized writes
@@ -128,6 +129,7 @@ function applyMark(msg) {
     const name = A.cleanName(msg.name);
     if (name) m.name = name;
     if (A.isChannelId(msg.uc)) m.uc = msg.uc;
+    delete m.src; // you changed it yourself, so it is now your own opinion (sent as votes)
     const changed = Object.keys(changes).filter(f => m[f] !== changes[f]);
     Object.assign(m, changes);
     m.t = Date.now();
@@ -180,8 +182,9 @@ function importData(msg) {
         const name = A.cleanName(v.name);
         if (name) m.name = name;
         if (A.isChannelId(v.uc)) m.uc = v.uc;
+        if (v.src === 'import') m.src = 'import'; else delete m.src;
         if (m.ai || m.pe) marks[key] = m; else delete marks[key];
-        if (sync?.enabled) { queueVotes(queue, key, m, changed, t); voted = true; }
+        if (sync?.enabled && !m.src) { queueVotes(queue, key, m, changed, t); voted = true; }
         count++;
       }
     } else {
@@ -244,19 +247,30 @@ function wipe() {
  */
 function configureSync(msg) {
   return serial(async () => {
-    const { sync = {}, marks = {}, identity } = await get(['sync', 'marks', 'identity']);
+    const { sync = {}, marks = {}, identity, pendingForget = [] } = await get(['sync', 'marks', 'identity', 'pendingForget']);
+    const gen = (sync.gen || 0) + 1; // running uploads compare this and stop when it changes
+    const forgets = Array.isArray(pendingForget) ? pendingForget : [pendingForget];
+    /** Queues "delete my votes" for the server this identity was used with (even mid-registration). */
+    const forgetCurrent = () => {
+      const where = identity?.registeredAt || sync.server;
+      if (identity?.secret && where) forgets.push({ server: where, secret: identity.secret });
+    };
     if (!msg.enabled) {
-      const out = { sync: { enabled: false, server: sync.server || '' }, queue: {}, syncReplace: false };
-      if (msg.withdraw && identity?.registeredAt && identity.secret) {
-        out.pendingForget = { server: identity.registeredAt, secret: identity.secret };
-      }
-      await set(out);
+      if (msg.withdraw) forgetCurrent();
+      await set({ sync: { enabled: false, server: sync.server || '', gen }, queue: {}, syncReplace: 0, pendingForget: forgets });
+      if (msg.withdraw) await api.storage.local.remove('identity'); // a fresh anonymous ID next time
       await api.storage.local.remove(['community', 'communityMeta', 'syncStatus']);
-      if (out.pendingForget) syncNow();
+      if (forgets.length) syncNow();
       return { ok: true };
     }
     const server = A.serverBase(msg.server);
     if (!server) return { ok: false, error: 'invalid server address' };
+    if (sync.server && sync.server !== server) {
+      // Moving servers: delete your votes from the old one and use a new identity, so
+      // the two servers can't link you.
+      forgetCurrent();
+      await api.storage.local.remove(['identity', 'powProgress']);
+    }
 
     const queue = {};
     const t = Date.now();
@@ -265,7 +279,7 @@ function configureSync(msg) {
       if (m.src === 'import') continue; // other people's lists are not your votes
       queueVotes(queue, key, m, FLAGS.filter(f => m[f]), t);
     }
-    const out = { sync: { enabled: true, server }, queue, syncReplace: true };
+    const out = { sync: { enabled: true, server, gen }, queue, syncReplace: gen, pendingForget: forgets };
     await set(out);
     if (sync.server !== server) await api.storage.local.remove(['community', 'communityMeta', 'syncStatus']);
     syncNow();
@@ -374,14 +388,21 @@ function unqueue(sent) {
  * @returns {Promise<number>} number of votes accepted
  */
 async function flushQueue(server) {
-  const { queue = {}, syncReplace } = await get(['queue', 'syncReplace']);
+  const { queue = {}, syncReplace, sync } = await get(['queue', 'syncReplace', 'sync']);
   const items = Object.entries(queue);
   if (!items.length && !syncReplace) return 0;
+  const gen = sync?.gen || 0;
+  /** Stops the upload if sync was turned off or moved since it started. */
+  const stillWanted = async () => {
+    const { sync: now } = await get('sync');
+    if (!now?.enabled || (now.gen || 0) !== gen || now.server !== server) throw new Error('sync settings changed');
+  };
 
   let identity = await ensureIdentity(server);
   let replace = !!syncReplace;
   let sent = 0;
   for (let i = 0; i < items.length || replace; i += LIMITS.MAX_BATCH) {
+    await stillWanted();
     const part = items.slice(i, i + LIMITS.MAX_BATCH);
     const body = () => ({ secret: identity.secret, replace, votes: part.map(([, v]) => ({ k: v.k, f: v.f, v: v.v, name: v.name })) });
     try {
@@ -398,7 +419,13 @@ async function flushQueue(server) {
       if (!(e instanceof HttpError) || e.status !== 400) throw e;
       console.warn('[Argus] server rejected a vote batch; dropping it:', e.message);
     }
-    if (replace) { replace = false; await set({ syncReplace: false }); }
+    if (replace) {
+      replace = false;
+      await serial(async () => { // only clear the flag this upload was started for
+        const { syncReplace: cur } = await get('syncReplace');
+        if (cur === syncReplace) await set({ syncReplace: 0 });
+      });
+    }
     await unqueue(part);
   }
   return sent;
@@ -438,16 +465,19 @@ async function fetchCommunity(server) {
  * Kept until the server confirms, so it also works after coming back online.
  */
 async function sendPendingForget() {
-  const { pendingForget: p } = await get('pendingForget');
-  if (!p) return;
-  try {
-    await post(p.server, '/forget', { secret: p.secret });
-  } catch (e) {
-    if (!(e instanceof HttpError) || e.status >= 500 || e.status === 429) return; // retry later
+  const { pendingForget } = await get('pendingForget');
+  const list = Array.isArray(pendingForget) ? pendingForget : pendingForget ? [pendingForget] : [];
+  for (const p of list) {
+    try {
+      await post(p.server, '/forget', { secret: p.secret });
+    } catch (e) {
+      if (!(e instanceof HttpError) || e.status >= 500 || e.status === 429) continue; // retry later
+    }
+    await serial(async () => {
+      const { pendingForget: cur = [] } = await get('pendingForget');
+      await set({ pendingForget: (Array.isArray(cur) ? cur : [cur]).filter(x => x.secret !== p.secret || x.server !== p.server) });
+    });
   }
-  await api.storage.local.remove('pendingForget');
-  const { identity } = await get('identity');
-  if (identity?.registeredAt === p.server) await set({ identity: { ...identity, registeredAt: null } });
 }
 
 /**
@@ -458,13 +488,21 @@ async function sendPendingForget() {
 async function syncOnce() {
   await sendPendingForget();
   const { sync } = await get('sync');
-  if (!sync?.enabled || !sync.server) return { ok: false, error: 'Sync is off' };
+  if (!sync?.enabled || !sync.server) {
+    const { pendingForget = [] } = await get('pendingForget');
+    if (Array.isArray(pendingForget) && pendingForget.length) api.alarms.create(FLUSH_ALARM, { delayInMinutes: RETRY_MIN });
+    return { ok: false, error: 'Sync is off' };
+  }
   const status = { at: Date.now(), sent: 0, count: 0 };
   try { status.sent = await flushQueue(sync.server); } catch (e) { status.uploadError = String(e.message || e); }
   try { status.count = await fetchCommunity(sync.server); } catch (e) { status.downloadError = String(e.message || e); }
   status.ok = !status.uploadError && !status.downloadError;
   if (!status.ok) status.error = status.uploadError || status.downloadError;
   await set({ syncStatus: status });
+  const { queue = {}, pendingForget = [] } = await get(['queue', 'pendingForget']);
+  if (Object.keys(queue).length || (Array.isArray(pendingForget) && pendingForget.length)) {
+    api.alarms.create(FLUSH_ALARM, { delayInMinutes: RETRY_MIN }); // retry soon: online windows can be short
+  }
   return status;
 }
 
@@ -589,7 +627,7 @@ function setup() {
   api.alarms.create(SHARED_ALARM, { periodInMinutes: SHARED_PERIOD_MIN, delayInMinutes: 2 });
 }
 api.runtime.onInstalled.addListener(setup);
-api.runtime.onStartup.addListener(setup);
+api.runtime.onStartup.addListener(() => { setup(); syncNow(); });
 
 api.alarms.onAlarm.addListener(a => {
   if (a.name === SYNC_ALARM || a.name === FLUSH_ALARM) syncNow();
@@ -609,9 +647,13 @@ const HANDLERS = {
   [MSG.UPDATE_LIST]: updateShared,
 };
 
+/** Messages a YouTube tab may send; everything else only from the extension's own pages. */
+const FROM_TABS = new Set([MSG.MARK]);
+
 api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   const handler = HANDLERS[msg?.type];
-  if (!handler || sender?.id !== api.runtime.id) return undefined; // only our own pages
+  if (!handler || sender?.id !== api.runtime.id) return undefined; // only our own extension
+  if (sender.tab && !FROM_TABS.has(msg.type)) return undefined;     // content scripts may only mark
   Promise.resolve()
     .then(() => handler(msg))
     .then(sendResponse, e => sendResponse({ ok: false, error: String(e?.message || e) }));

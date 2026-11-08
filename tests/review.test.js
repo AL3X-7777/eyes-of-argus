@@ -75,9 +75,46 @@ test('F10: turning sync on queues every mark and replaces old server votes; wipe
   const { ask } = loadBackground(s);
   await ask({ type: 'argus-sync-config', enabled: true, server: 'https://x.test/' });
   assert.equal(s.data.sync.server, 'https://x.test');
-  assert.equal(s.data.syncReplace, true);
+  assert.ok(s.data.syncReplace, 'replace flag set');
   assert.deepEqual(Object.keys(s.data.queue).sort(), ['@a|ai', '@a|pe']);
   await ask({ type: 'argus-wipe' });
   assert.deepEqual(s.data.marks, {});
   assert.equal(s.data.queue['@a|ai'].v, 0);
+});
+
+test('N2/N4: marking an imported channel yourself makes it your vote; backups keep the import tag', async () => {
+  const s = fakeStorage();
+  const { ask } = loadBackground(s);
+  await ask({ type: 'argus-import', data: { channels: { '@x': { ai: true } } } });
+  assert.equal(s.data.marks['@x'].src, 'import');
+  await ask({ type: 'argus-mark', key: '@x', changes: { pe: 1 } });
+  assert.equal(s.data.marks['@x'].src, undefined);
+  await ask({ type: 'argus-sync-config', enabled: true, server: 'https://x.test' });
+  assert.ok(s.data.queue['@x|pe'], 'now counted as your vote');
+
+  const t = fakeStorage({ sync: { enabled: true, server: 'https://x.test' } });
+  const b = loadBackground(t);
+  await b.ask({ type: 'argus-import', data: { mine: { '@y': { ai: 1, pe: 0, src: 'import' } } } });
+  assert.equal(t.data.marks['@y'].src, 'import');
+  assert.equal(t.data.queue, undefined, 'imported-list marks in a backup are not voted');
+});
+
+test('N3/N6: opting out or moving servers queues deletion, even before registration finished', async () => {
+  const s = fakeStorage({ sync: { enabled: true, server: 'https://old.test' }, identity: { secret: 'a'.repeat(64), id: 'x', registeredAt: null } });
+  const { ask } = loadBackground(s);
+  await ask({ type: 'argus-sync-config', enabled: true, server: 'https://new.test' });
+  assert.deepEqual(s.data.pendingForget.map(p => p.server), ['https://old.test']);
+  assert.equal(s.data.identity?.secret === 'a'.repeat(64), false, 'new identity for the new server');
+});
+
+test('N9: a YouTube tab may only send marks', async () => {
+  const s = fakeStorage({ marks: { '@a': { ai: 1, pe: 0 } } });
+  const { api } = loadBackground(s);
+  const call = (msg, sender) => new Promise(resolve => {
+    const r = api.runtime.onMessage.fns[0](msg, sender, resolve);
+    if (r !== true) resolve('ignored');
+  });
+  assert.equal(await call({ type: 'argus-wipe' }, { tab: { id: 1 } }), 'ignored');
+  assert.ok(s.data.marks['@a']);
+  assert.equal((await call({ type: 'argus-mark', key: '@b', changes: { ai: 1 } }, { tab: { id: 1 } })).ok, true);
 });

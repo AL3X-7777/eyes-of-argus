@@ -31,7 +31,7 @@ export function cfg(env) {
     votesPerDay: num(env.VOTES_PER_DAY, 1000),
     votesPerNetDay: num(env.VOTES_PER_NET_DAY, 5000),
     regPerNetDay: num(env.REG_PER_NET_DAY, 5),
-    maxPerRun: num(env.MAX_PER_RUN, 1800),
+    maxPerRun: Math.min(num(env.MAX_PER_RUN, 1800), 1800), // free plan: 50 queries per run
   };
 }
 
@@ -62,8 +62,8 @@ export function netOf(ip) {
   const mapped = s.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i);
   if (mapped) return mapped[1];
   if (!s.includes(':')) return s || 'unknown';
-  const g = expandV6(s);
-  return g ? `${g[0]}:${g[1]}:${g[2]}:${g[3].slice(0, 2)}::/56` : 'unknown-v6';
+  const g = expandV6(s.replace(/%.*$/, '')); // drop a zone id like %eth0
+  return g ? `${g[0]}:${g[1]}:${g[2]}:${g[3].slice(0, 2)}::/56` : s; // unparsable: its own bucket
 }
 
 /**
@@ -141,12 +141,13 @@ export function score(t, ov, name, c) {
     const r = t?.[f] || {};
     const up = r.up || 0, down = r.down || 0, n = r.n || 0;
     total += n;
+    const weighted = Math.round(up + down); // shown as "x% of N votes": only votes that counted
     const pct = up + down > 0 ? Math.round((100 * up) / (up + down)) : 0;
     raw[f] = { pct, n };
     let shown = up + down >= c.minVotes && pct >= c.minAgree;
     if (ov?.[f] === 1) { shown = true; overrides |= 1 << i; }
     if (ov?.[f] === 0) shown = false;
-    out.push(shown ? Math.max(pct, ov?.[f] === 1 && !pct ? 100 : 1) : 0, n);
+    out.push(shown ? Math.max(pct, ov?.[f] === 1 && !pct ? 100 : 1) : 0, weighted);
   });
   if (!out[0] && !out[2]) return { entry: null, raw, total };
   const entry = [...out, name || ''];
