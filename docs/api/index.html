@@ -1,0 +1,837 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>JSDoc: Home</title>
+
+    <script src="scripts/prettify/prettify.js"> </script>
+    <script src="scripts/prettify/lang-css.js"> </script>
+    <!--[if lt IE 9]>
+      <script src="//html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+    <link type="text/css" rel="stylesheet" href="styles/prettify-tomorrow.css">
+    <link type="text/css" rel="stylesheet" href="styles/jsdoc-default.css">
+</head>
+
+<body>
+
+<div id="main">
+
+    <h1 class="page-title">Home</h1>
+
+    
+
+
+
+    
+
+
+    <h3> </h3>
+
+
+
+
+
+
+
+
+
+
+    
+
+
+
+
+    <section>
+        <article><h1>The Eyes of Argus</h1>
+<p>A browser extension that marks YouTube channels that use AI and/or are owned by private equity.
+Right-click a channel name or video → <strong>The Eyes of Argus</strong> → mark it. Works offline, with no account.
+Optional community sync through a tiny self-hosted server (see <code>server/README.md</code>).</p>
+<h2>Install</h2>
+<p><strong>Firefox (for testing)</strong></p>
+<ol>
+<li>Open <code>about:debugging#/runtime/this-firefox</code></li>
+<li>Click <strong>Load Temporary Add-on…</strong> and pick <code>eyes-of-argus-firefox-0.2.0.zip</code></li>
+<li>Reload any open YouTube tabs</li>
+</ol>
+<p>Temporary add-ons disappear when Firefox restarts. To keep it installed, upload the zip to
+https://addons.mozilla.org/developers/ as <strong>&quot;On your own&quot;</strong> (unlisted). Signing is free and you
+get a signed <code>.xpi</code> you can install permanently.</p>
+<p><strong>Chrome / Edge / Brave / Opera</strong></p>
+<ol>
+<li>Unzip <code>eyes-of-argus-chrome-0.2.0.zip</code> into a folder</li>
+<li>Open <code>chrome://extensions</code> (or <code>edge://extensions</code>), turn on <strong>Developer mode</strong></li>
+<li>Click <strong>Load unpacked</strong> and pick the folder</li>
+</ol>
+<h2>Using it</h2>
+<ul>
+<li>Right-click a channel name, a video thumbnail, or anywhere on a watch/channel page</li>
+<li><strong>Mark as AI channel</strong> / <strong>Mark as private-equity owned</strong> (a channel can be both)</li>
+<li><strong>Not AI</strong> / <strong>Not PE-owned</strong>: you disagree. This hides community/shared marks for you and votes against them</li>
+<li><strong>Clear</strong>: back to no opinion</li>
+<li>Marked channels get an <code>AI</code> / <code>PE</code> badge and tinted name everywhere on YouTube</li>
+<li>Click the toolbar icon for settings: badges, tinting, fading marked videos, your list of marks</li>
+</ul>
+<h2>Community sync</h2>
+<p>Turn it on in settings and enter your sync server address. Votes are queued while you're offline
+and sent when you're back online. The community list is cached for offline use.</p>
+<h2>Sharing marks without a server</h2>
+<ul>
+<li><strong>Export marks</strong> in settings creates a JSON file you can send to others, who <strong>Import</strong> it</li>
+<li>Or host that file somewhere static and free (e.g. a GitHub repo) and others paste its raw URL
+into <strong>Shared list</strong>. It updates twice a day when online. Your own marks always override it.</li>
+</ul>
+<p>List format:</p>
+<pre class="prettyprint source lang-json"><code>{ &quot;app&quot;: &quot;eyes-of-argus&quot;, &quot;version&quot;: 1,
+  &quot;channels&quot;: {
+    &quot;@somechannel&quot;: { &quot;ai&quot;: true, &quot;pe&quot;: false, &quot;name&quot;: &quot;Some Channel&quot; },
+    &quot;UCxxxxxxxxxxxxxxxxxxxxxx&quot;: { &quot;ai&quot;: false, &quot;pe&quot;: true, &quot;name&quot;: &quot;Other&quot; }
+  } }
+</code></pre>
+<h2>Building from source</h2>
+<p>Edit files in <code>src/</code>, then run <code>python build.py</code>. Output goes to <code>dist/</code>.</p></article>
+    </section>
+
+
+
+
+
+
+
+
+
+<section>
+
+<header>
+    
+        <h2>server/src/index.js</h2>
+        
+    
+</header>
+
+<article>
+    <div class="container-overview">
+    
+        
+            <div class="description"><p>The Eyes of Argus sync server (Cloudflare Worker + D1 + R2).</p>
+<table>
+<thead>
+<tr>
+<th>Route</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GET  /config</code></td>
+<td>puzzle difficulty and thresholds</td>
+</tr>
+<tr>
+<td><code>GET  /snapshot.json</code></td>
+<td>the community list (ETag, edge cache)</td>
+</tr>
+<tr>
+<td><code>POST /register</code></td>
+<td><code>{secret, nonce}</code> → <code>{id}</code>: anonymous install, proof of work</td>
+</tr>
+<tr>
+<td><code>POST /votes</code></td>
+<td><code>{secret, votes:[{k,f,v,name}], replace?}</code></td>
+</tr>
+<tr>
+<td><code>POST /forget</code></td>
+<td><code>{secret}</code>: delete all of this install's votes and the install</td>
+</tr>
+<tr>
+<td><code>POST /admin/rebuild</code></td>
+<td><code>Authorization: Bearer &lt;ADMIN_TOKEN&gt;</code>: recount everything</td>
+</tr>
+<tr>
+<td>cron (15 min)</td>
+<td>recount changed channels, patch the snapshot</td>
+</tr>
+</tbody>
+</table>
+<p>Abuse resistance (see server/README.md, &quot;Threat model&quot;): POSTs only from extensions
+or non-browser clients; daily limits per install and per network (IPv6 grouped by
+/56); new installs carry no weight for their first days; at most <code>MAX_PER_NET</code>
+votes per channel count from installs registered on the same network.</p></div>
+        
+
+        
+
+
+<dl class="details">
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+    <dt class="tag-source">Source:</dt>
+    <dd class="tag-source"><ul class="dummy"><li>
+        <a href="server_src_index.js.html">server/src/index.js</a>, <a href="server_src_index.js.html#line1">line 1</a>
+    </li></ul></dd>
+    
+
+    
+
+    
+
+    
+</dl>
+
+
+        
+    
+    </div>
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+</article>
+
+</section>
+
+
+
+
+
+
+
+<section>
+
+<header>
+    
+        <h2>server/src/lib.js</h2>
+        
+    
+</header>
+
+<article>
+    <div class="container-overview">
+    
+        
+            <div class="description"><p>Pure helpers for the sync server (no Cloudflare bindings), so they can be
+unit-tested in Node.</p></div>
+        
+
+        
+
+
+<dl class="details">
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+    <dt class="tag-source">Source:</dt>
+    <dd class="tag-source"><ul class="dummy"><li>
+        <a href="server_src_lib.js.html">server/src/lib.js</a>, <a href="server_src_lib.js.html#line1">line 1</a>
+    </li></ul></dd>
+    
+
+    
+
+    
+
+    
+</dl>
+
+
+        
+    
+    </div>
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+</article>
+
+</section>
+
+
+
+
+
+
+
+<section>
+
+<header>
+    
+        <h2>src/background.js</h2>
+        
+    
+</header>
+
+<article>
+    <div class="container-overview">
+    
+        
+            <div class="description"><p>Background script of The Eyes of Argus.</p>
+<p>Runs as an event page in Firefox and as a service worker in Chromium; either can be
+stopped at any time and restarted by an event, so every listener is registered
+synchronously at the top level and all state lives in <code>storage.local</code>.</p>
+<p>Responsibilities:</p>
+<ol>
+<li>The right-click menu on YouTube.</li>
+<li>The <strong>only writer</strong> of your marks, the vote queue and sync settings. The content
+script and the settings page send messages (see <code>Argus.MSG</code>); every change runs
+through one promise chain (<a href="global.html#serial">serial</a>), so two tabs can never overwrite each
+other's change.</li>
+<li>Community sync: anonymous registration (proof of work), sending queued votes,
+downloading the community list. Upload and download fail independently, so the
+last community list always keeps working offline.</li>
+<li>The optional subscribed shared list (any static JSON file).</li>
+</ol>
+<p>Storage keys (all in <code>storage.local</code>):</p>
+<table>
+<thead>
+<tr>
+<th>key</th>
+<th>written by</th>
+<th>content</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>marks</td>
+<td>background</td>
+<td><code>{ [key]: {ai, pe, name, uc?, t} }</code> with ai/pe ∈ {1, -1, 0}</td>
+</tr>
+<tr>
+<td>queue</td>
+<td>background</td>
+<td>`{ [&quot;key</td>
+</tr>
+<tr>
+<td>syncReplace</td>
+<td>background</td>
+<td>true → next upload replaces all your votes on the server</td>
+</tr>
+<tr>
+<td>sync</td>
+<td>background</td>
+<td><code>{enabled, server}</code></td>
+</tr>
+<tr>
+<td>identity</td>
+<td>background</td>
+<td><code>{secret, id, registeredAt}</code> anonymous install identity</td>
+</tr>
+<tr>
+<td>powProgress</td>
+<td>background</td>
+<td><code>{id, bits, next}</code> so a stopped worker resumes the puzzle</td>
+</tr>
+<tr>
+<td>pendingForget</td>
+<td>background</td>
+<td><code>{server, secret}</code> &quot;delete my votes&quot; still to be sent</td>
+</tr>
+<tr>
+<td>community</td>
+<td>background</td>
+<td><code>{c: {[key]: entry}}</code> only rewritten when the list changed</td>
+</tr>
+<tr>
+<td>communityMeta</td>
+<td>background</td>
+<td><code>{count, etag, generated, checked}</code></td>
+</tr>
+<tr>
+<td>syncStatus</td>
+<td>background</td>
+<td>result of the last sync</td>
+</tr>
+<tr>
+<td>sharedList</td>
+<td>background</td>
+<td><code>{channels, count, updated}</code></td>
+</tr>
+<tr>
+<td>listUrl</td>
+<td>options</td>
+<td>subscribed shared-list URL</td>
+</tr>
+<tr>
+<td>settings</td>
+<td>options</td>
+<td><code>{badges, tint, dim}</code> display toggles</td>
+</tr>
+</tbody>
+</table></div>
+        
+
+        
+
+
+<dl class="details">
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+    <dt class="tag-source">Source:</dt>
+    <dd class="tag-source"><ul class="dummy"><li>
+        <a href="src_background.js.html">src/background.js</a>, <a href="src_background.js.html#line1">line 1</a>
+    </li></ul></dd>
+    
+
+    
+
+    
+
+    
+</dl>
+
+
+        
+    
+    </div>
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+</article>
+
+</section>
+
+
+
+
+
+
+
+<section>
+
+<header>
+    
+        <h2>src/content.js</h2>
+        
+    
+</header>
+
+<article>
+    <div class="container-overview">
+    
+        
+            <div class="description"><p>Content script of The Eyes of Argus (runs on youtube.com, top frame only).</p>
+<p>Two jobs:</p>
+<ol>
+<li><strong>Show marks.</strong> Every channel link on the page gets a <code>data-argus=&quot;ai pe&quot;</code>
+attribute and its video card a <code>data-argus-card</code> attribute; <code>content.css</code> turns
+those into badges, tinted names and faded cards. Setting attributes is the only DOM
+work, so the cost on YouTube stays tiny.</li>
+<li><strong>Resolve right-clicks.</strong> When a menu item is chosen, work out which channel was
+right-clicked and ask the background to change it (the background is the only
+part that writes marks; see background.js).</li>
+</ol>
+<p>Where a channel's state comes from, highest priority first:
+your own mark (yes / &quot;not&quot;) → the subscribed shared list → the community list.</p></div>
+        
+
+        
+
+
+<dl class="details">
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+    <dt class="tag-source">Source:</dt>
+    <dd class="tag-source"><ul class="dummy"><li>
+        <a href="src_content.js.html">src/content.js</a>, <a href="src_content.js.html#line1">line 1</a>
+    </li></ul></dd>
+    
+
+    
+
+    
+
+    
+</dl>
+
+
+        
+    
+    </div>
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+</article>
+
+</section>
+
+
+
+
+
+
+
+<section>
+
+<header>
+    
+        <h2>src/options.js</h2>
+        
+    
+</header>
+
+<article>
+    <div class="container-overview">
+    
+        
+            <div class="description"><p>Settings page of The Eyes of Argus.</p>
+<p>Reads everything straight from <code>storage.local</code> and re-renders when it changes. It
+never writes marks, the vote queue or sync settings itself: those changes are sent
+to the background (the single writer, see background.js) as <code>Argus.MSG</code> messages.
+Display toggles and the shared-list URL are the only keys written here.</p>
+<p>Permission prompts (<code>permissions.request</code>) must run directly inside a click, before
+any other <code>await</code>, or browsers refuse them; every handler below keeps that order.</p></div>
+        
+
+        
+
+
+<dl class="details">
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+    <dt class="tag-source">Source:</dt>
+    <dd class="tag-source"><ul class="dummy"><li>
+        <a href="src_options.js.html">src/options.js</a>, <a href="src_options.js.html#line1">line 1</a>
+    </li></ul></dd>
+    
+
+    
+
+    
+
+    
+</dl>
+
+
+        
+    
+    </div>
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+</article>
+
+</section>
+
+
+
+
+
+
+
+<section>
+
+<header>
+    
+        <h2>src/shared.js</h2>
+        
+    
+</header>
+
+<article>
+    <div class="container-overview">
+    
+        
+            <div class="description"><p>Shared helpers for every part of The Eyes of Argus.</p>
+<p>Loaded first in every context:</p>
+<ul>
+<li>the YouTube content script (<code>manifest.content_scripts</code>),</li>
+<li>the background (Firefox event page via <code>background.scripts</code>, Chromium service
+worker via <code>importScripts</code>),</li>
+<li>the settings page (<code>&lt;script&gt;</code> tag),</li>
+<li>the Cloudflare Worker (<code>import '../../src/shared.js'</code>), so that client and server
+agree on what a valid channel key is and how proof-of-work is checked.</li>
+</ul>
+<p>Nothing here touches the DOM or extension APIs, so it is safe in all of them.
+Everything is exposed on one frozen global, <code>globalThis.Argus</code>.</p></div>
+        
+
+        
+
+
+<dl class="details">
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+    <dt class="tag-source">Source:</dt>
+    <dd class="tag-source"><ul class="dummy"><li>
+        <a href="src_shared.js.html">src/shared.js</a>, <a href="src_shared.js.html#line1">line 1</a>
+    </li></ul></dd>
+    
+
+    
+
+    
+
+    
+</dl>
+
+
+        
+    
+    </div>
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+</article>
+
+</section>
+
+
+
+
+</div>
+
+<nav>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="HttpError.html">HttpError</a></li></ul><h3>Global</h3><ul><li><a href="global.html#A">A</a></li><li><a href="global.html#CACHE_KEY">CACHE_KEY</a></li><li><a href="global.html#CORS_GET">CORS_GET</a></li><li><a href="global.html#DAY">DAY</a></li><li><a href="global.html#HANDLERS">HANDLERS</a></li><li><a href="global.html#IMPORT">IMPORT</a></li><li><a href="global.html#MARK">MARK</a></li><li><a href="global.html#MAX_BATCH">MAX_BATCH</a></li><li><a href="global.html#MAX_BODY">MAX_BODY</a></li><li><a href="global.html#MAX_NAME">MAX_NAME</a></li><li><a href="global.html#MENU">MENU</a></li><li><a href="global.html#POW_MAX_BITS">POW_MAX_BITS</a></li><li><a href="global.html#SYNC_CONFIG">SYNC_CONFIG</a></li><li><a href="global.html#SYNC_NOW">SYNC_NOW</a></li><li><a href="global.html#UPDATE_LIST">UPDATE_LIST</a></li><li><a href="global.html#WIPE">WIPE</a></li><li><a href="global.html#allow">allow</a></li><li><a href="global.html#applyMark">applyMark</a></li><li><a href="global.html#buildMenus">buildMenus</a></li><li><a href="global.html#cfg">cfg</a></li><li><a href="global.html#chunks">chunks</a></li><li><a href="global.html#configureSync">configureSync</a></li><li><a href="global.html#dirtyUserChannels">dirtyUserChannels</a></li><li><a href="global.html#ensureIdentity">ensureIdentity</a></li><li><a href="global.html#expandV6">expandV6</a></li><li><a href="global.html#fetchCommunity">fetchCommunity</a></li><li><a href="global.html#flushQueue">flushQueue</a></li><li><a href="global.html#forget">forget</a></li><li><a href="global.html#get">get</a></li><li><a href="global.html#importData">importData</a></li><li><a href="global.html#json">json</a></li><li><a href="global.html#netHash">netHash</a></li><li><a href="global.html#netOf">netOf</a></li><li><a href="global.html#normalizeShared">normalizeShared</a></li><li><a href="global.html#num">num</a></li><li><a href="global.html#originAllowed">originAllowed</a></li><li><a href="global.html#post">post</a></li><li><a href="global.html#queueVotes">queueVotes</a></li><li><a href="global.html#readJson">readJson</a></li><li><a href="global.html#readMark">readMark</a></li><li><a href="global.html#rebuild">rebuild</a></li><li><a href="global.html#register">register</a></li><li><a href="global.html#safeEqual">safeEqual</a></li><li><a href="global.html#scheduleFlush">scheduleFlush</a></li><li><a href="global.html#score">score</a></li><li><a href="global.html#sendPendingForget">sendPendingForget</a></li><li><a href="global.html#serial">serial</a></li><li><a href="global.html#set">set</a></li><li><a href="global.html#setup">setup</a></li><li><a href="global.html#snapshot">snapshot</a></li><li><a href="global.html#solvePow">solvePow</a></li><li><a href="global.html#syncNow">syncNow</a></li><li><a href="global.html#syncOnce">syncOnce</a></li><li><a href="global.html#unqueue">unqueue</a></li><li><a href="global.html#updateShared">updateShared</a></li><li><a href="global.html#userFromSecret">userFromSecret</a></li><li><a href="global.html#votes">votes</a></li><li><a href="global.html#wipe">wipe</a></li></ul>
+</nav>
+
+<br class="clear">
+
+<footer>
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.5</a>
+</footer>
+
+<script> prettyPrint(); </script>
+<script src="scripts/linenumber.js"> </script>
+</body>
+</html>

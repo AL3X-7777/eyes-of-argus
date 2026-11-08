@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>JSDoc: Source: src/content.js</title>
+
+    <script src="scripts/prettify/prettify.js"> </script>
+    <script src="scripts/prettify/lang-css.js"> </script>
+    <!--[if lt IE 9]>
+      <script src="//html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+    <link type="text/css" rel="stylesheet" href="styles/prettify-tomorrow.css">
+    <link type="text/css" rel="stylesheet" href="styles/jsdoc-default.css">
+</head>
+
+<body>
+
+<div id="main">
+
+    <h1 class="page-title">Source: src/content.js</h1>
+
+    
+
+
+
+    
+    <section>
+        <article>
+            <pre class="prettyprint source linenums"><code>/**
+ * @file Content script of The Eyes of Argus (runs on youtube.com, top frame only).
+ *
+ * Two jobs:
+ * 1. **Show marks.** Every channel link on the page gets a `data-argus="ai pe"`
+ *    attribute and its video card a `data-argus-card` attribute; `content.css` turns
+ *    those into badges, tinted names and faded cards. Setting attributes is the only DOM
+ *    work, so the cost on YouTube stays tiny.
+ * 2. **Resolve right-clicks.** When a menu item is chosen, work out which channel was
+ *    right-clicked and ask the background to change it (the background is the only
+ *    part that writes marks; see background.js).
+ *
+ * Where a channel's state comes from, highest priority first:
+ * your own mark (yes / "not") → the subscribed shared list → the community list.
+ */
+(() => {
+  'use strict';
+
+  const api = globalThis.browser ?? globalThis.chrome;
+  const A = globalThis.Argus;
+  const { FLAGS, MSG } = A;
+
+  /** Elements YouTube uses for a single video/channel card. */
+  const CARD_SEL = [
+    'ytd-rich-item-renderer', 'ytd-video-renderer', 'ytd-grid-video-renderer',
+    'ytd-compact-video-renderer', 'ytd-playlist-video-renderer', 'ytd-channel-renderer',
+    'ytd-playlist-panel-video-renderer', 'ytd-reel-item-renderer', 'yt-lockup-view-model',
+    'ytm-shorts-lockup-view-model',
+  ].join(',');
+  /** The owner box under a video on the watch page. */
+  const OWNER_SEL = 'ytd-video-owner-renderer, ytd-watch-metadata';
+  /** Any link that can point at a channel. */
+  const LINK_SEL = 'a[href*="/@"], a[href*="/channel/UC"]';
+  /** Mutations inside the video player never add channel links; ignore them. */
+  const PLAYER_SEL = '#movie_player, ytd-player';
+  /** A right-click older than this is not trusted for a menu action. */
+  const TARGET_MAX_AGE_MS = 15000;
+  const SCAN_DELAY_MS = 200;
+
+  let local = {};      // your marks         { key: {ai, pe, name, uc, t} }
+  let shared = {};     // subscribed list    { key: {ai, pe, name} }
+  let community = {};  // community list     { key: [aiPct, aiVotes, pePct, peVotes, name?, overrideBits?] }
+  let settings = { badges: true, tint: true, dim: false };
+  let syncOn = false;
+  let communityAll = {};
+
+  /** @type {Map&lt;string, {st: string, title: string|null}>} key → state shown on the page */
+  const merged = new Map();
+  /** Number of elements currently carrying our attributes (for the idle shortcut). */
+  let taggedCount = 0;
+  /** @type {{el: Element, at: number}|null} */
+  let lastTarget = null;
+  /** Times used to decide whether `link[rel=canonical]` belongs to the current page. */
+  let navStartAt = 0;
+  let canonicalAt = 0;
+
+  // ---------------------------------------------------------------------------
+  // State
+  // ---------------------------------------------------------------------------
+
+  /** Recomputes `merged` from your marks, the shared list and the community list. */
+  function rebuild() {
+    merged.clear();
+    // A mark saved with its UC… id also applies to /channel/UC… links
+    const mine = { ...local };
+    for (const v of Object.values(local)) if (v.uc &amp;&amp; !mine[v.uc]) mine[v.uc] = v;
+
+    const keys = new Set([...Object.keys(shared), ...Object.keys(community), ...Object.keys(mine)]);
+    for (const key of keys) {
+      const l = mine[key], s = shared[key], c = community[key];
+      const on = FLAGS.filter((f, i) => {
+        const lv = A.val(l?.[f]);
+        return lv ? lv > 0 : !!(s?.[f] || (c &amp;&amp; c[i * 2] > 0));
+      });
+      if (!on.length) continue;
+      merged.set(key, { st: on.join(' '), title: c ? communityTitle(c) : null });
+    }
+  }
+
+  /**
+   * Hover text for a community entry.
+   * @param {Array&lt;number|string>} c `[aiPct, aiVotes, pePct, peVotes, name?, overrideBits?]`
+   * @returns {string|null}
+   */
+  function communityTitle(c) {
+    const o = Number(c[5]) || 0;
+    const parts = [];
+    if (c[0]) parts.push(o &amp; 1 ? 'AI (set by list maintainer)' : `AI ${c[0]}% of ${c[1]} votes`);
+    if (c[2]) parts.push(o &amp; 2 ? 'PE-owned (set by list maintainer)' : `PE-owned ${c[2]}% of ${c[3]} votes`);
+    return parts.length ? 'Eyes of Argus community: ' + parts.join(' · ') : null;
+  }
+
+  /** Applies the display settings as classes on &lt;html> (CSS does the rest). */
+  function applySettings() {
+    const c = document.documentElement.classList;
+    c.toggle('argus-badges', !!settings.badges);
+    c.toggle('argus-tint', !!settings.tint);
+    c.toggle('argus-dim', !!settings.dim);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Scanning
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Tags every channel link and card on the page, and untags anything that no longer
+   * qualifies (YouTube reuses elements and changes their href in place).
+   */
+  function scan() {
+    scheduled = false;
+    if (!merged.size &amp;&amp; !taggedCount) return; // nothing marked and nothing to clean up
+
+    const tagged = new Set();
+    const cards = new Map();
+    for (const a of document.querySelectorAll(LINK_SEL)) {
+      const m = merged.get(A.keyFromHref(a.getAttribute('href')));
+      const st = m ? m.st : '';
+      const isText = st &amp;&amp; a.textContent.trim() !== '' &amp;&amp; !a.querySelector('img, yt-img-shadow, yt-avatar-shape');
+      if (isText) {
+        if (a.dataset.argus !== st) a.dataset.argus = st;
+        if (m.title &amp;&amp; a.title !== m.title) { a.title = m.title; a.dataset.argusTitle = '1'; }
+        tagged.add(a);
+      }
+      const card = st &amp;&amp; a.closest(CARD_SEL);
+      if (card) cards.set(card, st);
+    }
+    for (const [card, st] of cards) {
+      if (card.dataset.argusCard !== st) card.dataset.argusCard = st;
+      tagged.add(card);
+    }
+    // Clean up everything tagged earlier that this pass didn't confirm
+    for (const el of document.querySelectorAll('[data-argus], [data-argus-card], [data-argus-title]')) {
+      if (tagged.has(el) &amp;&amp; (el.dataset.argus || el.dataset.argusCard)) {
+        if (el.dataset.argusTitle &amp;&amp; !merged.get(A.keyFromHref(el.getAttribute('href')))?.title) {
+          el.removeAttribute('title'); delete el.dataset.argusTitle;
+        }
+        continue;
+      }
+      delete el.dataset.argus;
+      delete el.dataset.argusCard;
+      if (el.dataset.argusTitle) { el.removeAttribute('title'); delete el.dataset.argusTitle; }
+    }
+    taggedCount = tagged.size;
+  }
+
+  let scheduled = false;
+  /** Schedules one scan; many mutations in a burst cause a single scan. */
+  function schedule() {
+    if (scheduled) return;
+    scheduled = true;
+    setTimeout(() => {
+      if (typeof requestIdleCallback === 'function') requestIdleCallback(scan, { timeout: 500 });
+      else scan();
+    }, SCAN_DELAY_MS);
+  }
+
+  /** @param {MutationRecord[]} records */
+  function onMutations(records) {
+    let relevant = false;
+    for (const r of records) {
+      const t = r.target;
+      if (t.nodeName === 'LINK' &amp;&amp; t.rel === 'canonical') canonicalAt = Date.now();
+      for (const n of r.addedNodes) if (n.nodeName === 'LINK' &amp;&amp; n.rel === 'canonical') canonicalAt = Date.now();
+      if (!relevant &amp;&amp; !(t.closest &amp;&amp; t.closest(PLAYER_SEL))) relevant = true;
+    }
+    if (relevant) schedule();
+  }
+
+  new MutationObserver(onMutations).observe(document.documentElement, {
+    childList: true, subtree: true, attributes: true, attributeFilter: ['href'],
+  });
+  document.addEventListener('yt-navigate-start', () => { navStartAt = Date.now(); });
+  document.addEventListener('yt-navigate-finish', schedule);
+
+  // ---------------------------------------------------------------------------
+  // Right-click → channel
+  // ---------------------------------------------------------------------------
+
+  document.addEventListener('contextmenu', e => { lastTarget = { el: e.target, at: Date.now() }; }, true);
+
+  /** @param {Element|null} a @returns {{key: string, name: string}|null} */
+  function fromAnchor(a) {
+    const key = a &amp;&amp; A.keyFromHref(a.getAttribute('href'));
+    return key ? { key, name: a.textContent.trim() } : null;
+  }
+
+  /**
+   * Works out which channel a right-clicked element belongs to.
+   * @param {Element} el
+   * @returns {{key: string, name: string, uc: string}|null} null when unsure
+   */
+  function resolve(el) {
+    const direct = fromAnchor(el.closest('a[href]'));
+    if (direct) return finish(direct, el.closest(CARD_SEL) || el.closest(OWNER_SEL));
+
+    const box = el.closest(CARD_SEL) || el.closest(OWNER_SEL);
+    if (box) {
+      for (const a of box.querySelectorAll(LINK_SEL)) {
+        const r = fromAnchor(a);
+        if (r) return finish(r, box);
+      }
+      return null; // inside a card but no channel link: don't guess
+    }
+    // On a channel page: the channel itself
+    const pageKey = A.keyFromHref(location.pathname);
+    if (pageKey) {
+      const h = document.querySelector('yt-page-header-view-model h1, #page-header h1, #channel-name #text');
+      return finish({ key: pageKey, name: h?.textContent.trim() || '' }, null);
+    }
+    // On a watch page: the video's owner
+    if (location.pathname === '/watch') {
+      const owner = fromAnchor(document.querySelector('ytd-watch-metadata ytd-video-owner-renderer a[href]'));
+      if (owner) return finish(owner, document.querySelector('ytd-video-owner-renderer'));
+    }
+    return null;
+  }
+
+  /**
+   * Fills in the display name and, on the channel's own page, its permanent `UC…` id.
+   * The canonical link is only trusted if it was set after the last in-page navigation
+   * started (or on a fresh page load), so channel B never inherits channel A's id.
+   * @param {{key: string, name: string, uc: string}} r
+   * @param {Element|null} box card or owner box to look for a name in
+   */
+  function finish(r, box) {
+    if (!r.name &amp;&amp; box) {
+      for (const a of box.querySelectorAll(LINK_SEL)) {
+        if (A.keyFromHref(a.getAttribute('href')) === r.key &amp;&amp; a.textContent.trim()) { r.name = a.textContent.trim(); break; }
+      }
+    }
+    r.name = r.name || r.key;
+    if (r.key.startsWith('@') &amp;&amp; A.keyFromHref(location.pathname) === r.key &amp;&amp; canonicalAt >= navStartAt) {
+      const m = document.querySelector('link[rel="canonical"]')?.href.match(/\/channel\/(UC[\w-]{22})/);
+      if (m) r.uc = m[1];
+    }
+    return r;
+  }
+
+  /** Menu action → flag changes and the confirmation text. */
+  const ACTIONS = {
+    ai:    { changes: { ai: 1 },        msg: 'marked as AI' },
+    pe:    { changes: { pe: 1 },        msg: 'marked as private-equity owned' },
+    notai: { changes: { ai: -1 },       msg: 'marked as not AI' },
+    notpe: { changes: { pe: -1 },       msg: 'marked as not PE-owned' },
+    clear: { changes: { ai: 0, pe: 0 }, msg: 'cleared' },
+  };
+
+  /**
+   * Handles a menu click forwarded by the background.
+   * @param {string} action one of the ACTIONS keys
+   */
+  async function onMenu(action) {
+    const a = ACTIONS[action];
+    if (!a) return;
+    const target = lastTarget &amp;&amp; Date.now() - lastTarget.at &lt; TARGET_MAX_AGE_MS ? lastTarget.el : null;
+    lastTarget = null; // one right-click, one action
+    const t = target &amp;&amp; resolve(target);
+    if (!t) { toast('No channel found here. Right-click the channel name or a video', true); return; }
+    try {
+      const res = await api.runtime.sendMessage({ type: MSG.MARK, key: t.key, name: t.name, uc: t.uc, changes: a.changes });
+      if (res?.ok) toast(`${t.name} ${a.msg}`);
+      else toast(`Couldn't save: ${res?.error || 'unknown error'}`, true);
+    } catch {
+      toast('Couldn\'t save: the extension was updated. Reload this page', true);
+    }
+  }
+
+  api.runtime.onMessage.addListener(msg => {
+    if (msg?.type === MSG.MENU) onMenu(msg.action);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Toast
+  // ---------------------------------------------------------------------------
+
+  let toastEl, toastTimer;
+  /**
+   * Shows a short confirmation at the bottom of the page.
+   * @param {string} text
+   * @param {boolean} [warn] amber border for problems
+   */
+  function toast(text, warn) {
+    if (!toastEl) {
+      toastEl = document.createElement('div');
+      toastEl.id = 'argus-toast';
+      toastEl.setAttribute('role', 'status');
+      document.documentElement.appendChild(toastEl);
+    }
+    toastEl.textContent = '👁 ' + text;
+    toastEl.classList.toggle('warn', !!warn);
+    toastEl.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => toastEl.classList.remove('show'), 2200);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Load and live updates
+  // ---------------------------------------------------------------------------
+
+  /** Shows the community list only while sync is on. */
+  const refreshCommunity = () => { community = syncOn ? communityAll : {}; };
+
+  api.storage.local.get(['marks', 'sharedList', 'settings', 'sync', 'community']).then(d => {
+    local = d.marks || {};
+    shared = d.sharedList?.channels || {};
+    settings = { ...settings, ...(d.settings || {}) };
+    syncOn = !!d.sync?.enabled;
+    communityAll = d.community?.c || {};
+    refreshCommunity();
+    rebuild(); applySettings(); schedule();
+  });
+
+  api.storage.onChanged.addListener((ch, area) => {
+    if (area !== 'local') return;
+    if (ch.settings) { settings = { ...settings, ...(ch.settings.newValue || {}) }; applySettings(); }
+    if (!(ch.marks || ch.sharedList || ch.sync || ch.community)) return;
+    if (ch.marks) local = ch.marks.newValue || {};
+    if (ch.sharedList) shared = ch.sharedList.newValue?.channels || {};
+    if (ch.sync) syncOn = !!ch.sync.newValue?.enabled;
+    if (ch.community) communityAll = ch.community.newValue?.c || {};
+    refreshCommunity();
+    rebuild(); schedule();
+  });
+})();
+</code></pre>
+        </article>
+    </section>
+
+
+
+
+</div>
+
+<nav>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="HttpError.html">HttpError</a></li></ul><h3>Global</h3><ul><li><a href="global.html#A">A</a></li><li><a href="global.html#CACHE_KEY">CACHE_KEY</a></li><li><a href="global.html#CORS_GET">CORS_GET</a></li><li><a href="global.html#DAY">DAY</a></li><li><a href="global.html#HANDLERS">HANDLERS</a></li><li><a href="global.html#IMPORT">IMPORT</a></li><li><a href="global.html#MARK">MARK</a></li><li><a href="global.html#MAX_BATCH">MAX_BATCH</a></li><li><a href="global.html#MAX_BODY">MAX_BODY</a></li><li><a href="global.html#MAX_NAME">MAX_NAME</a></li><li><a href="global.html#MENU">MENU</a></li><li><a href="global.html#POW_MAX_BITS">POW_MAX_BITS</a></li><li><a href="global.html#SYNC_CONFIG">SYNC_CONFIG</a></li><li><a href="global.html#SYNC_NOW">SYNC_NOW</a></li><li><a href="global.html#UPDATE_LIST">UPDATE_LIST</a></li><li><a href="global.html#WIPE">WIPE</a></li><li><a href="global.html#allow">allow</a></li><li><a href="global.html#applyMark">applyMark</a></li><li><a href="global.html#buildMenus">buildMenus</a></li><li><a href="global.html#cfg">cfg</a></li><li><a href="global.html#chunks">chunks</a></li><li><a href="global.html#configureSync">configureSync</a></li><li><a href="global.html#dirtyUserChannels">dirtyUserChannels</a></li><li><a href="global.html#ensureIdentity">ensureIdentity</a></li><li><a href="global.html#expandV6">expandV6</a></li><li><a href="global.html#fetchCommunity">fetchCommunity</a></li><li><a href="global.html#flushQueue">flushQueue</a></li><li><a href="global.html#forget">forget</a></li><li><a href="global.html#get">get</a></li><li><a href="global.html#importData">importData</a></li><li><a href="global.html#json">json</a></li><li><a href="global.html#netHash">netHash</a></li><li><a href="global.html#netOf">netOf</a></li><li><a href="global.html#normalizeShared">normalizeShared</a></li><li><a href="global.html#num">num</a></li><li><a href="global.html#originAllowed">originAllowed</a></li><li><a href="global.html#post">post</a></li><li><a href="global.html#queueVotes">queueVotes</a></li><li><a href="global.html#readJson">readJson</a></li><li><a href="global.html#readMark">readMark</a></li><li><a href="global.html#rebuild">rebuild</a></li><li><a href="global.html#register">register</a></li><li><a href="global.html#safeEqual">safeEqual</a></li><li><a href="global.html#scheduleFlush">scheduleFlush</a></li><li><a href="global.html#score">score</a></li><li><a href="global.html#sendPendingForget">sendPendingForget</a></li><li><a href="global.html#serial">serial</a></li><li><a href="global.html#set">set</a></li><li><a href="global.html#setup">setup</a></li><li><a href="global.html#snapshot">snapshot</a></li><li><a href="global.html#solvePow">solvePow</a></li><li><a href="global.html#syncNow">syncNow</a></li><li><a href="global.html#syncOnce">syncOnce</a></li><li><a href="global.html#unqueue">unqueue</a></li><li><a href="global.html#updateShared">updateShared</a></li><li><a href="global.html#userFromSecret">userFromSecret</a></li><li><a href="global.html#votes">votes</a></li><li><a href="global.html#wipe">wipe</a></li></ul>
+</nav>
+
+<br class="clear">
+
+<footer>
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.5</a>
+</footer>
+
+<script> prettyPrint(); </script>
+<script src="scripts/linenumber.js"> </script>
+</body>
+</html>

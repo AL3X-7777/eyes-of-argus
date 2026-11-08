@@ -1,283 +1,327 @@
-// The Eyes of Argus — settings page
-const api = globalThis.browser ?? chrome;
-const $ = s => document.querySelector(s);
-const DEFAULTS = { badges: true, tint: true, dim: false };
-const val = x => (x === true || x === 1 ? 1 : x === -1 ? -1 : 0);
+/**
+ * @file Settings page of The Eyes of Argus.
+ *
+ * Reads everything straight from `storage.local` and re-renders when it changes. It
+ * never writes marks, the vote queue or sync settings itself: those changes are sent
+ * to the background (the single writer, see background.js) as `Argus.MSG` messages.
+ * Display toggles and the shared-list URL are the only keys written here.
+ *
+ * Permission prompts (`permissions.request`) must run directly inside a click, before
+ * any other `await`, or browsers refuse them; every handler below keeps that order.
+ */
+(() => {
+  'use strict';
 
-let marks = {};
-let syncCfg = { enabled: false, server: '' };
+  const api = globalThis.browser ?? globalThis.chrome;
+  const A = globalThis.Argus;
+  const { FLAGS, MSG } = A;
+  const $ = s => document.querySelector(s);
+  const DEFAULTS = { badges: true, tint: true, dim: false };
+  /** Firefox asks separately for permission to send data (data_collection_permissions). */
+  const IS_FIREFOX = typeof api.runtime.getBrowserInfo === 'function';
 
-function status(el, text, kind) {
-  el.textContent = text;
-  el.className = 'muted ' + (kind || '');
-}
+  let marks = {};
+  let syncCfg = { enabled: false, server: '' };
 
-// ---------- display settings ----------
-async function loadSettings() {
-  const { settings = {} } = await api.storage.local.get('settings');
-  const s = { ...DEFAULTS, ...settings };
-  for (const box of document.querySelectorAll('[data-setting]')) {
-    box.checked = !!s[box.dataset.setting];
-    box.addEventListener('change', async () => {
-      const { settings: cur = {} } = await api.storage.local.get('settings');
-      await api.storage.local.set({ settings: { ...DEFAULTS, ...cur, [box.dataset.setting]: box.checked } });
-    });
+  /**
+   * Shows a status line under a section.
+   * @param {Element} el
+   * @param {string} text
+   * @param {'ok'|'err'} [kind]
+   */
+  function setStatus(el, text, kind) {
+    el.textContent = text;
+    el.className = 'muted ' + (kind || '');
   }
-}
 
-// ---------- marks table ----------
-function channelUrl(key) {
-  return key.startsWith('@') ? `https://www.youtube.com/${key}` : `https://www.youtube.com/channel/${key}`;
-}
-
-function render() {
-  const q = $('#search').value.trim().toLowerCase();
-  const tbody = $('#marks tbody');
-  tbody.textContent = '';
-  const all = Object.entries(marks).filter(([, v]) => val(v.ai) || val(v.pe));
-  $('#count').textContent = all.length;
-  $('#empty').hidden = all.length > 0;
-
-  const rows = all
-    .filter(([k, v]) => !q || k.toLowerCase().includes(q) || (v.name || '').toLowerCase().includes(q))
-    .sort((a, b) => (b[1].t || 0) - (a[1].t || 0));
-
-  for (const [key, v] of rows) {
-    const tr = document.createElement('tr');
-
-    const td = document.createElement('td');
-    const a = document.createElement('a');
-    a.href = channelUrl(key); a.target = '_blank'; a.rel = 'noreferrer';
-    a.textContent = v.name || key;
-    const k = document.createElement('span');
-    k.className = 'k'; k.textContent = key;
-    td.append(a, k);
-    tr.append(td);
-
-    for (const flag of ['ai', 'pe']) {
-      const c = document.createElement('td');
-      const sel = document.createElement('select');
-      for (const [value, label] of [['0', '–'], ['1', 'Yes'], ['-1', 'Not']]) sel.add(new Option(label, value));
-      const cur = val(v[flag]);
-      sel.value = String(cur);
-      sel.className = `${flag} ${cur > 0 ? 'yes' : cur < 0 ? 'no' : ''}`;
-      sel.title = flag === 'ai' ? 'Uses AI' : 'Private-equity owned';
-      sel.addEventListener('change', () => save(key, { [flag]: +sel.value }));
-      c.append(sel); tr.append(c);
-    }
-
-    const del = document.createElement('td');
-    const x = document.createElement('button');
-    x.className = 'x'; x.textContent = '✕'; x.title = 'Remove mark';
-    x.addEventListener('click', () => save(key, { ai: 0, pe: 0 }));
-    del.append(x); tr.append(del);
-
-    tbody.append(tr);
-  }
-}
-
-// Updates one channel and, with sync on, queues the changed votes.
-async function save(key, changes) {
-  const { marks: cur = {}, queue = {} } = await api.storage.local.get(['marks', 'queue']);
-  const old = cur[key] || {};
-  const e = { ...old, ai: val(old.ai), pe: val(old.pe), t: Date.now() };
-  const changed = [];
-  for (const [f, v] of Object.entries(changes)) { if (e[f] !== v) changed.push(f); e[f] = v; }
-  if (e.ai || e.pe) cur[key] = e; else delete cur[key];
-
-  const out = { marks: cur };
-  if (syncCfg.enabled && changed.length) {
-    for (const f of changed) for (const k of [key, e.uc].filter(Boolean))
-      queue[`${k}|${f}`] = { k, f, v: e[f], name: e.name || key, t: e.t };
-    out.queue = queue;
-  }
-  await api.storage.local.set(out);
-}
-
-// ---------- community sync ----------
-function fmtTime(t) { return t ? new Date(t).toLocaleString() : 'never'; }
-
-async function renderSync() {
-  const d = await api.storage.local.get(['sync', 'queue', 'syncStatus', 'community', 'identity']);
-  syncCfg = { enabled: false, server: '', ...(d.sync || {}) };
-  $('#syncEnabled').checked = syncCfg.enabled;
-  if (document.activeElement !== $('#syncServer')) $('#syncServer').value = syncCfg.server;
-  $('#syncPill').textContent = syncCfg.enabled ? 'On' : 'Off';
-  $('#syncPill').classList.toggle('on', syncCfg.enabled);
-  if (!syncCfg.enabled) return status($('#syncStatus'), 'Sync is off. Your marks stay on this computer.');
-
-  const queued = Object.keys(d.queue || {}).length;
-  const parts = [];
-  parts.push(queued ? `${queued} vote${queued > 1 ? 's' : ''} waiting to be sent` : 'All votes sent');
-  if (d.community) parts.push(`community list: ${d.community.count} channels`);
-  parts.push(`last sync: ${fmtTime(d.syncStatus?.at)}`);
-  if (d.identity?.id) parts.push(`your anonymous ID: ${d.identity.id.slice(0, 8)}…`);
-  const s = d.syncStatus;
-  if (s && !s.ok) parts.push(`last error: ${s.error} (will retry)`);
-  status($('#syncStatus'), parts.join(' · '), s && !s.ok ? 'err' : 'ok');
-}
-
-function checkServer(url) {
-  let u;
-  try { u = new URL(url); } catch { return null; }
-  const local = u.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(u.hostname);
-  if (u.protocol !== 'https:' && !local) return null;
-  return u.origin;
-}
-
-async function runSync() {
-  status($('#syncStatus'), 'Syncing… (the first time includes a one-time puzzle that takes a few seconds)');
-  await api.runtime.sendMessage({ type: 'argus-sync-now' });
-  renderSync();
-}
-
-$('#syncEnabled').addEventListener('change', async e => {
-  const box = e.target;
-  if (!box.checked) {
-    await api.storage.local.set({ sync: { ...syncCfg, enabled: false }, queue: {} });
-    return renderSync();
-  }
-  const server = $('#syncServer').value.trim().replace(/\/+$/, '');
-  const origin = checkServer(server);
-  if (!origin) {
-    box.checked = false;
-    return status($('#syncStatus'), 'Enter the sync server address first (must start with https://).', 'err');
-  }
-  // must be the first await so the browser still counts it as your click
-  const granted = await api.permissions.request({ origins: [origin + '/*'] });
-  if (!granted) { box.checked = false; return status($('#syncStatus'), 'Permission to reach that server was refused.', 'err'); }
-
-  // Send everything you've marked so far as your first votes
-  const { marks: cur = {}, queue = {} } = await api.storage.local.get(['marks', 'queue']);
-  const t = Date.now();
-  for (const [key, m] of Object.entries(cur)) {
-    for (const f of ['ai', 'pe']) {
-      const v = val(m[f]);
-      if (!v) continue;
-      for (const k of [key, m.uc].filter(Boolean)) queue[`${k}|${f}`] = { k, f, v, name: m.name || key, t };
+  /**
+   * Sends a message to the background and returns its answer.
+   * @param {Object} msg
+   * @returns {Promise<Object>}
+   */
+  async function ask(msg) {
+    try {
+      return (await api.runtime.sendMessage(msg)) || { ok: false, error: 'no answer' };
+    } catch (e) {
+      return { ok: false, error: String(e?.message || e) };
     }
   }
-  await api.storage.local.set({ sync: { enabled: true, server }, queue });
-  syncCfg = { enabled: true, server };
-  runSync();
-});
 
-$('#syncServer').addEventListener('change', async () => {
-  const server = $('#syncServer').value.trim().replace(/\/+$/, '');
-  if (!syncCfg.enabled) { await api.storage.local.set({ sync: { ...syncCfg, server } }); return; }
-  const origin = checkServer(server);
-  if (!origin) return status($('#syncStatus'), 'That isn\'t a valid server address.', 'err');
-  const granted = await api.permissions.request({ origins: [origin + '/*'] });
-  if (!granted) return status($('#syncStatus'), 'Permission to reach that server was refused.', 'err');
-  await api.storage.local.set({ sync: { enabled: true, server }, community: null });
-  syncCfg = { enabled: true, server };
-  runSync();
-});
-
-$('#syncNow').addEventListener('click', () => {
-  if (!syncCfg.enabled) return status($('#syncStatus'), 'Turn on community sync first.', 'err');
-  runSync();
-});
-
-// ---------- shared list ----------
-function showListInfo(sharedList, listUrl) {
-  if (!listUrl) return status($('#listStatus'), 'No shared list.');
-  if (!sharedList) return status($('#listStatus'), 'Not downloaded yet.');
-  status($('#listStatus'), `${sharedList.count} channels · last updated ${fmtTime(sharedList.updated)}`, 'ok');
-}
-
-$('#saveList').addEventListener('click', async () => {
-  const url = $('#listUrl').value.trim();
-  if (!url) {
-    await api.storage.local.remove(['listUrl', 'sharedList']);
-    return status($('#listStatus'), 'Shared list removed.');
+  /**
+   * Asks for permission to talk to a server. Must be called synchronously from a click.
+   * @param {string} origin e.g. `https://example.com`
+   * @param {boolean} sendsData also ask Firefox's data-collection permission
+   * @returns {Promise<boolean>}
+   */
+  function requestAccess(origin, sendsData) {
+    const origins = [origin + '/*'];
+    const request = IS_FIREFOX && sendsData
+      ? api.permissions.request({ origins, data_collection: ['websiteActivity'] })
+        .catch(() => api.permissions.request({ origins }))
+      : api.permissions.request({ origins });
+    return request.catch(() => false);
   }
-  let origin;
-  try { origin = new URL(url).origin; } catch { return status($('#listStatus'), 'That isn\'t a valid URL.', 'err'); }
-  if (!url.startsWith('https://')) return status($('#listStatus'), 'The URL must start with https://', 'err');
 
-  const granted = await api.permissions.request({ origins: [origin + '/*'] });
-  if (!granted) return status($('#listStatus'), 'Permission to read that site was refused.', 'err');
+  /** @param {number|undefined} t @returns {string} */
+  const fmtTime = t => (t ? new Date(t).toLocaleString() : 'never');
 
-  await api.storage.local.set({ listUrl: url });
-  status($('#listStatus'), 'Downloading…');
-  const res = await api.runtime.sendMessage({ type: 'argus-update-list' });
-  if (res?.ok) status($('#listStatus'), `Loaded ${res.count} channels.`, 'ok');
-  else status($('#listStatus'), `Couldn't download: ${res?.error || 'unknown error'} (the last copy is still used)`, 'err');
-});
+  // ---------------------------------------------------------------------------
+  // Display settings
+  // ---------------------------------------------------------------------------
 
-// ---------- export / import ----------
-$('#export').addEventListener('click', () => {
-  const channels = {};
-  for (const [k, v] of Object.entries(marks)) {
-    const ai = val(v.ai), pe = val(v.pe);
-    if (ai > 0 || pe > 0) channels[k] = { ai: ai > 0, pe: pe > 0, name: v.name || k };
+  async function loadSettings() {
+    const { settings = {} } = await api.storage.local.get('settings');
+    const s = { ...DEFAULTS, ...settings };
+    for (const box of document.querySelectorAll('[data-setting]')) {
+      box.checked = !!s[box.dataset.setting];
+      box.addEventListener('change', async () => {
+        const { settings: cur = {} } = await api.storage.local.get('settings');
+        await api.storage.local.set({ settings: { ...DEFAULTS, ...cur, [box.dataset.setting]: box.checked } });
+      });
+    }
   }
-  const data = { app: 'eyes-of-argus', version: 1, exported: new Date().toISOString(), channels };
-  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = `argus-marks-${new Date().toISOString().slice(0, 10)}.json`;
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-  status($('#ioStatus'), `Exported ${Object.keys(channels).length} channels.`, 'ok');
-});
 
-$('#importBtn').addEventListener('click', () => $('#importFile').click());
-$('#importFile').addEventListener('change', async e => {
-  const file = e.target.files[0];
-  e.target.value = '';
-  if (!file) return;
-  try {
-    const data = JSON.parse(await file.text());
-    const src = data?.channels;
-    if (!src || typeof src !== 'object') throw new Error('not an Eyes of Argus file');
-    let n = 0;
-    for (const [k, v] of Object.entries(src)) {
-      if (!v || typeof v !== 'object') continue;
-      const key = k.startsWith('@') ? k.toLowerCase() : k;
-      const old = marks[key] || {};
-      const changes = {};
-      // imported "yes" fills in where you have no opinion; your own choices are kept
-      for (const f of ['ai', 'pe']) if (val(v[f]) > 0 && !val(old[f])) changes[f] = 1;
-      if (!Object.keys(changes).length) continue;
-      if (!old.name) {
-        const { marks: cur = {} } = await api.storage.local.get('marks');
-        cur[key] = { ...(cur[key] || {}), name: String(v.name || key).slice(0, 100) };
-        await api.storage.local.set({ marks: cur });
+  // ---------------------------------------------------------------------------
+  // Your marks
+  // ---------------------------------------------------------------------------
+
+  /** @param {string} key @returns {string} the channel's YouTube address */
+  const channelUrl = key => (key.startsWith('@') ? `https://www.youtube.com/${key}` : `https://www.youtube.com/channel/${key}`);
+
+  /** Renders the marks table (built with DOM methods only, never innerHTML). */
+  function render() {
+    const q = $('#search').value.trim().toLowerCase();
+    const tbody = $('#marks tbody');
+    tbody.textContent = '';
+    const all = Object.entries(marks).filter(([, v]) => A.val(v.ai) || A.val(v.pe));
+    $('#count').textContent = all.length;
+    $('#empty').hidden = all.length > 0;
+
+    const rows = all
+      .filter(([k, v]) => !q || k.includes(q) || (v.name || '').toLowerCase().includes(q))
+      .sort((a, b) => (b[1].t || 0) - (a[1].t || 0));
+
+    const frag = document.createDocumentFragment();
+    for (const [key, v] of rows) {
+      const name = v.name || key;
+      const tr = document.createElement('tr');
+
+      const td = document.createElement('td');
+      const a = document.createElement('a');
+      a.href = channelUrl(key); a.target = '_blank'; a.rel = 'noreferrer';
+      a.textContent = name;
+      const k = document.createElement('span');
+      k.className = 'k'; k.textContent = key;
+      td.append(a, k);
+      tr.append(td);
+
+      for (const flag of FLAGS) {
+        const c = document.createElement('td');
+        const sel = document.createElement('select');
+        for (const [value, label] of [['0', '–'], ['1', 'Yes'], ['-1', 'Not']]) sel.add(new Option(label, value));
+        const cur = A.val(v[flag]);
+        sel.value = String(cur);
+        sel.className = `${flag} ${cur > 0 ? 'yes' : cur < 0 ? 'no' : ''}`;
+        sel.setAttribute('aria-label', `${flag === 'ai' ? 'Uses AI' : 'Private-equity owned'}: ${name}`);
+        sel.addEventListener('change', () => ask({ type: MSG.MARK, key, changes: { [flag]: Number(sel.value) } }));
+        c.append(sel); tr.append(c);
       }
-      await save(key, changes);
-      n++;
+
+      const del = document.createElement('td');
+      const x = document.createElement('button');
+      x.className = 'x'; x.textContent = '✕';
+      x.setAttribute('aria-label', `Remove mark for ${name}`);
+      x.addEventListener('click', () => ask({ type: MSG.MARK, key, changes: { ai: 0, pe: 0 } }));
+      del.append(x); tr.append(del);
+
+      frag.append(tr);
     }
-    status($('#ioStatus'), `Imported ${n} channels.`, 'ok');
-  } catch (err) {
-    status($('#ioStatus'), `Import failed: ${err.message}`, 'err');
+    tbody.append(frag);
   }
-});
 
-$('#wipe').addEventListener('click', async () => {
-  if (!confirm('Delete all of your marks? This can\'t be undone (export first if you want a backup).')) return;
-  for (const key of Object.keys(marks)) await save(key, { ai: 0, pe: 0 });
-  status($('#ioStatus'), 'All marks deleted.');
-});
+  // ---------------------------------------------------------------------------
+  // Community sync
+  // ---------------------------------------------------------------------------
 
-// ---------- init ----------
-$('#search').addEventListener('input', render);
+  async function renderSync() {
+    const d = await api.storage.local.get(['sync', 'queue', 'syncStatus', 'communityMeta', 'identity', 'pendingForget']);
+    syncCfg = { enabled: false, server: '', ...(d.sync || {}) };
+    $('#syncEnabled').checked = syncCfg.enabled;
+    if (document.activeElement !== $('#syncServer')) $('#syncServer').value = syncCfg.server;
+    $('#syncPill').textContent = syncCfg.enabled ? 'On' : 'Off';
+    $('#syncPill').classList.toggle('on', syncCfg.enabled);
+    if (!syncCfg.enabled) {
+      const extra = d.pendingForget ? ' Your votes will be deleted from the server the next time you\'re online.' : '';
+      return setStatus($('#syncStatus'), 'Sync is off. Your marks stay on this computer.' + extra);
+    }
+    const queued = Object.keys(d.queue || {}).length;
+    const parts = [queued ? `${queued} vote${queued > 1 ? 's' : ''} waiting to be sent` : 'All votes sent'];
+    if (d.communityMeta) parts.push(`community list: ${d.communityMeta.count} channels`);
+    parts.push(`last sync: ${fmtTime(d.syncStatus?.at)}`);
+    if (d.identity?.id) parts.push(`your anonymous ID: ${d.identity.id.slice(0, 8)}…`);
+    const s = d.syncStatus;
+    if (s && !s.ok && s.error) parts.push(`last problem: ${s.error} (will retry)`);
+    setStatus($('#syncStatus'), parts.join(' · '), s && !s.ok ? 'err' : 'ok');
+  }
 
-api.storage.onChanged.addListener((ch, area) => {
-  if (area !== 'local') return;
-  if (ch.marks) { marks = ch.marks.newValue || {}; render(); }
-  if (ch.sharedList || ch.listUrl) api.storage.local.get(['sharedList', 'listUrl']).then(d => showListInfo(d.sharedList, d.listUrl));
-  if (ch.sync || ch.queue || ch.syncStatus || ch.community || ch.identity) renderSync();
-});
+  /**
+   * Turns sync on for the address in the box (asks for permission first).
+   * @param {HTMLInputElement|null} box the toggle, unticked again on failure
+   */
+  async function enableSync(box) {
+    const server = A.serverBase($('#syncServer').value);
+    if (!server) {
+      if (box) box.checked = false;
+      return setStatus($('#syncStatus'), 'Enter the sync server address first (it must start with https://).', 'err');
+    }
+    const old = syncCfg.server && A.serverBase(syncCfg.server);
+    if (!(await requestAccess(new URL(server).origin, true))) { // first await: still inside the click
+      if (box) box.checked = false;
+      return setStatus($('#syncStatus'), 'Permission to reach that server was refused.', 'err');
+    }
+    setStatus($('#syncStatus'), 'Syncing… (the first time includes a one-time puzzle, usually a few seconds)');
+    const res = await ask({ type: MSG.SYNC_CONFIG, enabled: true, server });
+    if (!res.ok) { if (box) box.checked = false; return setStatus($('#syncStatus'), res.error, 'err'); }
+    if (old && new URL(old).origin !== new URL(server).origin) dropAccess(old);
+  }
 
-(async () => {
-  await loadSettings();
-  const d = await api.storage.local.get(['marks', 'sharedList', 'listUrl']);
-  marks = d.marks || {};
-  $('#listUrl').value = d.listUrl || '';
-  showListInfo(d.sharedList, d.listUrl);
-  await renderSync();
-  render();
-  if (location.hash === '#help') $('#help').scrollIntoView();
+  /**
+   * Gives back permission for a server that is no longer used (unless the shared list uses it).
+   * @param {string} base
+   */
+  async function dropAccess(base) {
+    const { listUrl } = await api.storage.local.get('listUrl');
+    const origin = new URL(base).origin;
+    if (listUrl && new URL(listUrl).origin === origin) return;
+    api.permissions.remove({ origins: [origin + '/*'] }).catch(() => {});
+  }
+
+  $('#syncEnabled').addEventListener('change', async e => {
+    const box = e.target;
+    if (box.checked) return enableSync(box);
+    const withdraw = confirm('Turn off community sync.\n\nAlso delete all your votes from the sync server?\n(OK = delete them, Cancel = keep them)');
+    await ask({ type: MSG.SYNC_CONFIG, enabled: false, withdraw });
+  });
+
+  $('#saveServer').addEventListener('click', () => {
+    if (syncCfg.enabled) return enableSync(null);
+    const server = A.serverBase($('#syncServer').value);
+    if (!server) return setStatus($('#syncStatus'), 'That isn\'t a valid server address (it must start with https://).', 'err');
+    setStatus($('#syncStatus'), 'Address saved. Turn on community sync to use it.', 'ok');
+    $('#syncServer').value = server;
+    syncCfg.server = server;
+  });
+
+  $('#syncNow').addEventListener('click', async () => {
+    if (!syncCfg.enabled) return setStatus($('#syncStatus'), 'Turn on community sync first.', 'err');
+    setStatus($('#syncStatus'), 'Syncing…');
+    await ask({ type: MSG.SYNC_NOW });
+    renderSync();
+  });
+
+  // ---------------------------------------------------------------------------
+  // Shared list
+  // ---------------------------------------------------------------------------
+
+  function showListInfo(sharedList, listUrl) {
+    if (!listUrl) return setStatus($('#listStatus'), 'No shared list.');
+    if (!sharedList) return setStatus($('#listStatus'), 'Not downloaded yet.');
+    setStatus($('#listStatus'), `${sharedList.count} channels · last updated ${fmtTime(sharedList.updated)}`, 'ok');
+  }
+
+  $('#saveList').addEventListener('click', async () => {
+    const url = $('#listUrl').value.trim();
+    if (!url) {
+      await api.storage.local.remove(['listUrl', 'sharedList']);
+      return setStatus($('#listStatus'), 'Shared list removed.');
+    }
+    let origin;
+    try { origin = new URL(url).origin; } catch { return setStatus($('#listStatus'), 'That isn\'t a valid URL.', 'err'); }
+    if (!url.startsWith('https://')) return setStatus($('#listStatus'), 'The URL must start with https://', 'err');
+    if (!(await requestAccess(origin, false))) return setStatus($('#listStatus'), 'Permission to read that site was refused.', 'err');
+
+    await api.storage.local.set({ listUrl: url });
+    setStatus($('#listStatus'), 'Downloading…');
+    const res = await ask({ type: MSG.UPDATE_LIST });
+    if (res.ok) setStatus($('#listStatus'), `Loaded ${res.count} channels.`, 'ok');
+    else setStatus($('#listStatus'), `Couldn't download: ${res.error || 'unknown error'} (the last copy is still used)`, 'err');
+  });
+
+  // ---------------------------------------------------------------------------
+  // Export / import / wipe
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Builds the export file. `channels` keeps the simple shared-list format (only "yes"
+   * marks, so the file also works as a shared list); `mine` is the exact backup,
+   * including "Not" choices and UC ids.
+   * @returns {{app: string, version: number, exported: string, channels: Object, mine: Object}}
+   */
+  function buildExport() {
+    const channels = {}, mine = {};
+    for (const [k, v] of Object.entries(marks)) {
+      const ai = A.val(v.ai), pe = A.val(v.pe);
+      if (!ai && !pe) continue;
+      const name = v.name || k;
+      if (ai > 0 || pe > 0) channels[k] = { ai: ai > 0, pe: pe > 0, name };
+      mine[k] = { ai, pe, name, ...(v.uc ? { uc: v.uc } : {}) };
+    }
+    return { app: 'eyes-of-argus', version: 2, exported: new Date().toISOString(), channels, mine };
+  }
+
+  $('#export').addEventListener('click', () => {
+    const data = buildExport();
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `argus-marks-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    setStatus($('#ioStatus'), `Exported ${Object.keys(data.mine).length} channels.`, 'ok');
+  });
+
+  $('#importBtn').addEventListener('click', () => $('#importFile').click());
+  $('#importFile').addEventListener('change', async e => {
+    const file = e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+    let data;
+    try { data = JSON.parse(await file.text()); } catch { return setStatus($('#ioStatus'), 'Import failed: the file isn\'t valid JSON.', 'err'); }
+    const res = await ask({ type: MSG.IMPORT, data });
+    if (res.ok) setStatus($('#ioStatus'), `Imported ${res.count} channels.`, 'ok');
+    else setStatus($('#ioStatus'), `Import failed: ${res.error}`, 'err');
+  });
+
+  $('#wipe').addEventListener('click', async () => {
+    if (!confirm('Delete all of your marks? This can\'t be undone (export first if you want a backup).')) return;
+    await ask({ type: MSG.WIPE });
+    setStatus($('#ioStatus'), 'All marks deleted.');
+  });
+
+  // ---------------------------------------------------------------------------
+  // Start
+  // ---------------------------------------------------------------------------
+
+  $('#search').addEventListener('input', render);
+
+  api.storage.onChanged.addListener((ch, area) => {
+    if (area !== 'local') return;
+    if (ch.marks) { marks = ch.marks.newValue || {}; render(); }
+    if (ch.sharedList || ch.listUrl) api.storage.local.get(['sharedList', 'listUrl']).then(d => showListInfo(d.sharedList, d.listUrl));
+    if (ch.sync || ch.queue || ch.syncStatus || ch.communityMeta || ch.identity || ch.pendingForget) renderSync();
+  });
+
+  (async () => {
+    await loadSettings();
+    const d = await api.storage.local.get(['marks', 'sharedList', 'listUrl']);
+    marks = d.marks || {};
+    $('#listUrl').value = d.listUrl || '';
+    showListInfo(d.sharedList, d.listUrl);
+    await renderSync();
+    render();
+    if (location.hash === '#help') $('#help').scrollIntoView();
+  })();
+
+  // Exposed for tests only.
+  globalThis.__argusOptions = { buildExport };
 })();

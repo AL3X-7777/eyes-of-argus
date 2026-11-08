@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>JSDoc: Source: server/src/lib.js</title>
+
+    <script src="scripts/prettify/prettify.js"> </script>
+    <script src="scripts/prettify/lang-css.js"> </script>
+    <!--[if lt IE 9]>
+      <script src="//html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+    <link type="text/css" rel="stylesheet" href="styles/prettify-tomorrow.css">
+    <link type="text/css" rel="stylesheet" href="styles/jsdoc-default.css">
+</head>
+
+<body>
+
+<div id="main">
+
+    <h1 class="page-title">Source: server/src/lib.js</h1>
+
+    
+
+
+
+    
+    <section>
+        <article>
+            <pre class="prettyprint source linenums"><code>/**
+ * @file Pure helpers for the sync server (no Cloudflare bindings), so they can be
+ * unit-tested in Node.
+ */
+import '../../src/shared.js';
+
+/** Shared client/server helpers (key validation, hashing). */
+export const A = globalThis.Argus;
+
+/** Milliseconds in a day. */
+export const DAY = 86400e3;
+
+/**
+ * @param {unknown} v
+ * @param {number} d default
+ * @returns {number}
+ */
+const num = (v, d) => (v !== undefined &amp;&amp; v !== '' &amp;&amp; Number.isFinite(+v) ? +v : d);
+
+/**
+ * Server settings from `wrangler.toml` `[vars]`, with safe defaults.
+ * @param {Object} env Worker environment
+ */
+export function cfg(env) {
+  return {
+    powBits: Math.min(num(env.POW_BITS, 18), A.LIMITS.POW_MAX_BITS),
+    minVotes: num(env.MIN_VOTES, 15),
+    minAgree: num(env.MIN_AGREE, 70),
+    warmupMs: num(env.WARMUP_DAYS, 3) * DAY,
+    maxPerNet: num(env.MAX_PER_NET, 2),
+    votesPerDay: num(env.VOTES_PER_DAY, 1000),
+    votesPerNetDay: num(env.VOTES_PER_NET_DAY, 5000),
+    regPerNetDay: num(env.REG_PER_NET_DAY, 5),
+    maxPerRun: num(env.MAX_PER_RUN, 1800),
+  };
+}
+
+/**
+ * Expands an IPv6 address to 8 groups of 4 hex digits.
+ * @param {string} ip
+ * @returns {string[]|null}
+ */
+function expandV6(ip) {
+  const [head, tail = ''] = ip.split('::');
+  const h = head ? head.split(':') : [];
+  const t = ip.includes('::') &amp;&amp; tail ? tail.split(':') : [];
+  const fill = ip.includes('::') ? 8 - h.length - t.length : 0;
+  const all = [...h, ...Array(Math.max(fill, 0)).fill('0'), ...t];
+  if (all.length !== 8 || !all.every(g => /^[0-9a-f]{1,4}$/i.test(g))) return null;
+  return all.map(g => g.toLowerCase().padStart(4, '0'));
+}
+
+/**
+ * The "network" an address belongs to, for rate limits: the full IPv4 address, or the
+ * /56 prefix of an IPv6 address (one home connection usually gets a /56 or /64, so
+ * hashing the full IPv6 address would give one user endless "networks").
+ * @param {string} ip
+ * @returns {string}
+ */
+export function netOf(ip) {
+  const s = String(ip || '').trim();
+  const mapped = s.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i);
+  if (mapped) return mapped[1];
+  if (!s.includes(':')) return s || 'unknown';
+  const g = expandV6(s);
+  return g ? `${g[0]}:${g[1]}:${g[2]}:${g[3].slice(0, 2)}::/56` : 'unknown-v6';
+}
+
+/**
+ * Whether a POST may be processed. Web pages always send an `Origin` header on
+ * cross-site requests; only extension origins (or none, e.g. command-line tools) are
+ * accepted, so a website can't use its visitors' browsers to register or vote.
+ * @param {Request} req
+ * @returns {boolean}
+ */
+export function originAllowed(req) {
+  const o = req.headers.get('origin');
+  return !o || /^(chrome-extension|moz-extension|safari-web-extension):\/\//.test(o);
+}
+
+/**
+ * Reads a JSON body: requires `content-type: application/json` (which forces a CORS
+ * preflight that web pages can't pass) and refuses bodies over `LIMITS.MAX_BODY`.
+ * @param {Request} req
+ * @returns {Promise&lt;{ok: true, body: any}|{ok: false, status: number, error: string}>}
+ */
+export async function readJson(req) {
+  if (!(req.headers.get('content-type') || '').toLowerCase().startsWith('application/json')) {
+    return { ok: false, status: 415, error: 'content-type must be application/json' };
+  }
+  const max = A.LIMITS.MAX_BODY;
+  if (Number(req.headers.get('content-length') || 0) > max) return { ok: false, status: 413, error: 'body too large' };
+  const text = await req.text();
+  if (text.length > max) return { ok: false, status: 413, error: 'body too large' };
+  try { return { ok: true, body: JSON.parse(text) }; } catch { return { ok: false, status: 400, error: 'invalid JSON' }; }
+}
+
+/**
+ * Constant-time string comparison (both sides hashed first, so lengths match).
+ * Uses Workers' `crypto.subtle.timingSafeEqual` when available.
+ * @param {string} a
+ * @param {string} b
+ * @returns {Promise&lt;boolean>}
+ */
+export async function safeEqual(a, b) {
+  const enc = s => crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(s)));
+  const [x, y] = await Promise.all([enc(a), enc(b)]);
+  if (crypto.subtle.timingSafeEqual) return crypto.subtle.timingSafeEqual(x, y);
+  const u = new Uint8Array(x), v = new Uint8Array(y);
+  let diff = 0;
+  for (let i = 0; i &lt; u.length; i++) diff |= u[i] ^ v[i];
+  return diff === 0;
+}
+
+/**
+ * Splits an array into chunks.
+ * @template T
+ * @param {T[]} arr
+ * @param {number} n
+ * @returns {T[][]}
+ */
+export function chunks(arr, n) {
+  const out = [];
+  for (let i = 0; i &lt; arr.length; i += n) out.push(arr.slice(i, i + n));
+  return out;
+}
+
+/**
+ * Turns one channel's weighted tally into its community entry.
+ * @param {Object} t per flag `{up, down, n}` (weighted up/down, raw count)
+ * @param {Object} [ov] admin override (1 show, 0 hide)
+ * @param {string} name
+ * @param {{minVotes: number, minAgree: number}} c
+ * @returns {{entry: Array|null, raw: Object, total: number}} entry null = not shown
+ */
+export function score(t, ov, name, c) {
+  const out = [];
+  const raw = {};
+  let overrides = 0, total = 0;
+  A.FLAGS.forEach((f, i) => {
+    const r = t?.[f] || {};
+    const up = r.up || 0, down = r.down || 0, n = r.n || 0;
+    total += n;
+    const pct = up + down > 0 ? Math.round((100 * up) / (up + down)) : 0;
+    raw[f] = { pct, n };
+    let shown = up + down >= c.minVotes &amp;&amp; pct >= c.minAgree;
+    if (ov?.[f] === 1) { shown = true; overrides |= 1 &lt;&lt; i; }
+    if (ov?.[f] === 0) shown = false;
+    out.push(shown ? Math.max(pct, ov?.[f] === 1 &amp;&amp; !pct ? 100 : 1) : 0, n);
+  });
+  if (!out[0] &amp;&amp; !out[2]) return { entry: null, raw, total };
+  const entry = [...out, name || ''];
+  if (overrides) entry.push(overrides);
+  return { entry, raw, total };
+}
+</code></pre>
+        </article>
+    </section>
+
+
+
+
+</div>
+
+<nav>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="HttpError.html">HttpError</a></li></ul><h3>Global</h3><ul><li><a href="global.html#A">A</a></li><li><a href="global.html#CACHE_KEY">CACHE_KEY</a></li><li><a href="global.html#CORS_GET">CORS_GET</a></li><li><a href="global.html#DAY">DAY</a></li><li><a href="global.html#HANDLERS">HANDLERS</a></li><li><a href="global.html#IMPORT">IMPORT</a></li><li><a href="global.html#MARK">MARK</a></li><li><a href="global.html#MAX_BATCH">MAX_BATCH</a></li><li><a href="global.html#MAX_BODY">MAX_BODY</a></li><li><a href="global.html#MAX_NAME">MAX_NAME</a></li><li><a href="global.html#MENU">MENU</a></li><li><a href="global.html#POW_MAX_BITS">POW_MAX_BITS</a></li><li><a href="global.html#SYNC_CONFIG">SYNC_CONFIG</a></li><li><a href="global.html#SYNC_NOW">SYNC_NOW</a></li><li><a href="global.html#UPDATE_LIST">UPDATE_LIST</a></li><li><a href="global.html#WIPE">WIPE</a></li><li><a href="global.html#allow">allow</a></li><li><a href="global.html#applyMark">applyMark</a></li><li><a href="global.html#buildMenus">buildMenus</a></li><li><a href="global.html#cfg">cfg</a></li><li><a href="global.html#chunks">chunks</a></li><li><a href="global.html#configureSync">configureSync</a></li><li><a href="global.html#dirtyUserChannels">dirtyUserChannels</a></li><li><a href="global.html#ensureIdentity">ensureIdentity</a></li><li><a href="global.html#expandV6">expandV6</a></li><li><a href="global.html#fetchCommunity">fetchCommunity</a></li><li><a href="global.html#flushQueue">flushQueue</a></li><li><a href="global.html#forget">forget</a></li><li><a href="global.html#get">get</a></li><li><a href="global.html#importData">importData</a></li><li><a href="global.html#json">json</a></li><li><a href="global.html#netHash">netHash</a></li><li><a href="global.html#netOf">netOf</a></li><li><a href="global.html#normalizeShared">normalizeShared</a></li><li><a href="global.html#num">num</a></li><li><a href="global.html#originAllowed">originAllowed</a></li><li><a href="global.html#post">post</a></li><li><a href="global.html#queueVotes">queueVotes</a></li><li><a href="global.html#readJson">readJson</a></li><li><a href="global.html#readMark">readMark</a></li><li><a href="global.html#rebuild">rebuild</a></li><li><a href="global.html#register">register</a></li><li><a href="global.html#safeEqual">safeEqual</a></li><li><a href="global.html#scheduleFlush">scheduleFlush</a></li><li><a href="global.html#score">score</a></li><li><a href="global.html#sendPendingForget">sendPendingForget</a></li><li><a href="global.html#serial">serial</a></li><li><a href="global.html#set">set</a></li><li><a href="global.html#setup">setup</a></li><li><a href="global.html#snapshot">snapshot</a></li><li><a href="global.html#solvePow">solvePow</a></li><li><a href="global.html#syncNow">syncNow</a></li><li><a href="global.html#syncOnce">syncOnce</a></li><li><a href="global.html#unqueue">unqueue</a></li><li><a href="global.html#updateShared">updateShared</a></li><li><a href="global.html#userFromSecret">userFromSecret</a></li><li><a href="global.html#votes">votes</a></li><li><a href="global.html#wipe">wipe</a></li></ul>
+</nav>
+
+<br class="clear">
+
+<footer>
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.5</a>
+</footer>
+
+<script> prettyPrint(); </script>
+<script src="scripts/linenumber.js"> </script>
+</body>
+</html>

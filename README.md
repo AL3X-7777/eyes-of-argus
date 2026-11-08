@@ -8,7 +8,7 @@ Optional community sync through a tiny self-hosted server (see `server/README.md
 
 **Firefox (for testing)**
 1. Open `about:debugging#/runtime/this-firefox`
-2. Click **Load Temporary Add-on…** and pick `eyes-of-argus-firefox-0.2.0.zip`
+2. Click **Load Temporary Add-on…** and pick `eyes-of-argus-firefox-0.3.0.zip`
 3. Reload any open YouTube tabs
 
 Temporary add-ons disappear when Firefox restarts. To keep it installed, upload the zip to
@@ -16,7 +16,7 @@ https://addons.mozilla.org/developers/ as **"On your own"** (unlisted). Signing 
 get a signed `.xpi` you can install permanently.
 
 **Chrome / Edge / Brave / Opera**
-1. Unzip `eyes-of-argus-chrome-0.2.0.zip` into a folder
+1. Unzip `eyes-of-argus-chrome-0.3.0.zip` into a folder
 2. Open `chrome://extensions` (or `edge://extensions`), turn on **Developer mode**
 3. Click **Load unpacked** and pick the folder
 
@@ -48,3 +48,14 @@ List format:
 
 ## Building from source
 Edit files in `src/`, then run `python build.py`. Output goes to `dist/`.
+
+## Development
+```
+npm install && (cd server && npm install)
+python build.py      # builds dist/
+npm test             # 26 tests, including a local sync server
+npm run lint         # ESLint + Mozilla's add-on linter
+npm run docs         # API reference in docs/api
+```
+Architecture, storage keys, messages and file formats: `docs/ARCHITECTURE.md`.
+Firefox for Android: badges and sync work; marking needs the desktop right-click menu.

@@ -93,3 +93,45 @@ test('background: registers, sends queued votes, downloads the list, keeps votes
   assert.equal(back.ok, true, JSON.stringify(back));
   assert.deepEqual(storage.data.queue, {});
 });
+
+// ----- regression tests for the review findings -----
+
+test('F2: web pages and non-JSON bodies are refused; big bodies too', async () => {
+  const s = await newUser();
+  const body = { secret: s, votes: [{ k: '@x', f: 'ai', v: 1 }] };
+  assert.equal((await post('/votes', body, { origin: 'https://evil.example' })).status, 403);
+  assert.equal((await post('/votes', body, { origin: 'moz-extension://abc' })).status, 200);
+  const plain = await fetch(srv.url + '/votes', { method: 'POST', headers: { 'content-type': 'text/plain' }, body: JSON.stringify(body) });
+  assert.equal(plain.status, 415);
+  assert.equal((await post('/votes', { secret: s, votes: [], pad: 'x'.repeat(70000) })).status, 413);
+});
+
+test('F3: more channels than one chunk are all recounted; replace and forget work', async () => {
+  const a = await newUser(), b = await newUser();
+  const keys = Array.from({ length: 150 }, (_, i) => `@bulk${i}`);
+  for (const s of [a, b]) {
+    for (let i = 0; i < keys.length; i += 100) {
+      assert.equal((await post('/votes', { secret: s, votes: keys.slice(i, i + 100).map(k => ({ k, f: 'pe', v: 1 })) })).status, 200);
+    }
+  }
+  srv.sql('UPDATE users SET created_at = 0');
+  await recount();
+  let c = await snapshot();
+  assert.equal(keys.filter(k => c[k]).length, 150);
+
+  await post('/votes', { secret: a, replace: true, votes: [] }); // a now has no votes
+  await post('/forget', { secret: b });
+  await recount();
+  c = await snapshot();
+  assert.equal(keys.filter(k => c[k]).length, 0);
+  assert.equal((await post('/votes', { secret: b, votes: [{ k: '@x', f: 'ai', v: 1 }] })).status, 401, 'forgotten install is gone');
+});
+
+test('F5: a rejected vote batch is dropped and the community list still downloads', async () => {
+  const storage = fakeStorage({ sync: { enabled: true, server: srv.url }, queue: { 'bad|ai': { k: 'bad', f: 'ai', v: 1, t: 1 } } });
+  const { ask } = loadBackground(storage);
+  const r = await ask({ type: 'argus-sync-now' });
+  assert.ok(r.ok, JSON.stringify(r));
+  assert.deepEqual(storage.data.queue, {});
+  assert.ok(storage.data.communityMeta);
+});

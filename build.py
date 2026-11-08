@@ -8,7 +8,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).parent
 SRC, DIST = ROOT / "src", ROOT / "dist"
-VERSION = "0.2.0"
+VERSION = json.loads((ROOT / "package.json").read_text())["version"]  # single source of truth
 
 ICONS = {s: f"icons/icon{s}.png" for s in (16, 32, 48, 128)}
 
@@ -25,7 +25,7 @@ BASE = {
     "options_ui": {"page": "options.html", "open_in_tab": True},
     "content_scripts": [{
         "matches": ["*://*.youtube.com/*"],
-        "js": ["content.js"],
+        "js": ["shared.js", "content.js"],
         "css": ["content.css"],
         "run_at": "document_start",
     }],
@@ -33,15 +33,15 @@ BASE = {
 
 TARGETS = {
     "firefox": {
-        "background": {"scripts": ["background.js"]},
+        "background": {"scripts": ["shared.js", "background.js"]},
         "browser_specific_settings": {"gecko": {
             "id": "eyes-of-argus@argus.local",
-            "strict_min_version": "140.0",
-            "data_collection_permissions": {"required": ["none"]},
+            "strict_min_version": "142.0",
+            "data_collection_permissions": {"required": ["none"], "optional": ["websiteActivity"]},
         }, "gecko_android": {"strict_min_version": "142.0"}},
     },
     "chrome": {
-        "background": {"service_worker": "background.js"},
+        "background": {"service_worker": "background.js"},  # loads shared.js via importScripts
     },
 }
 

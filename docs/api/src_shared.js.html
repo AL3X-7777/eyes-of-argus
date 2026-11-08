@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>JSDoc: Source: src/shared.js</title>
+
+    <script src="scripts/prettify/prettify.js"> </script>
+    <script src="scripts/prettify/lang-css.js"> </script>
+    <!--[if lt IE 9]>
+      <script src="//html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+    <link type="text/css" rel="stylesheet" href="styles/prettify-tomorrow.css">
+    <link type="text/css" rel="stylesheet" href="styles/jsdoc-default.css">
+</head>
+
+<body>
+
+<div id="main">
+
+    <h1 class="page-title">Source: src/shared.js</h1>
+
+    
+
+
+
+    
+    <section>
+        <article>
+            <pre class="prettyprint source linenums"><code>/**
+ * @file Shared helpers for every part of The Eyes of Argus.
+ *
+ * Loaded first in every context:
+ * - the YouTube content script (`manifest.content_scripts`),
+ * - the background (Firefox event page via `background.scripts`, Chromium service
+ *   worker via `importScripts`),
+ * - the settings page (`&lt;script>` tag),
+ * - the Cloudflare Worker (`import '../../src/shared.js'`), so that client and server
+ *   agree on what a valid channel key is and how proof-of-work is checked.
+ *
+ * Nothing here touches the DOM or extension APIs, so it is safe in all of them.
+ * Everything is exposed on one frozen global, `globalThis.Argus`.
+ */
+(function (root) {
+  'use strict';
+
+  /**
+   * The two things a channel can be marked as.
+   * @type {ReadonlyArray&lt;'ai'|'pe'>}
+   */
+  const FLAGS = Object.freeze(['ai', 'pe']);
+
+  /**
+   * Message types exchanged between the extension's parts. The background is the
+   * only part that writes marks, the vote queue and sync settings; the content script
+   * and the settings page ask it to through these messages.
+   * @enum {string}
+   */
+  const MSG = Object.freeze({
+    /** background → content: a context-menu item was clicked `{action}` */
+    MENU: 'argus-menu',
+    /** content/options → background: change one channel `{key, name, uc, changes}` */
+    MARK: 'argus-mark',
+    /** options → background: merge an exported/shared file `{data}` */
+    IMPORT: 'argus-import',
+    /** options → background: delete all of your marks */
+    WIPE: 'argus-wipe',
+    /** options → background: turn sync on/off or change server `{enabled, server, withdraw}` */
+    SYNC_CONFIG: 'argus-sync-config',
+    /** options → background: sync right now */
+    SYNC_NOW: 'argus-sync-now',
+    /** options → background: (re)download the subscribed shared list */
+    UPDATE_LIST: 'argus-update-list',
+  });
+
+  /** Tunables that client and server must agree on. */
+  const LIMITS = Object.freeze({
+    /** Highest proof-of-work difficulty the extension will ever attempt. */
+    POW_MAX_BITS: 22,
+    /** Votes per request to `/votes`. */
+    MAX_BATCH: 100,
+    /** Longest channel name stored or sent. */
+    MAX_NAME: 100,
+    /** Largest request body the server reads, in bytes. */
+    MAX_BODY: 64 * 1024,
+  });
+
+  // YouTube handles: letters/digits of any script plus . _ - and middle dot. YouTube
+  // allows 3–30 characters; 1–100 are accepted so unusual or legacy handles still work.
+  // Control, format (zero-width) and whitespace characters are rejected.
+  const HANDLE_RE = /^@[\p{L}\p{N}\p{M}._\-·]{1,100}$/u;
+  const UC_RE = /^UC[\w-]{22}$/;
+
+  /**
+   * Turns page, user or network input into a canonical channel key, or null if invalid.
+   *
+   * Handles are percent-decoded, Unicode-normalized (NFC) and lowercased, so
+   * `/@%C3%89cole`, `@École` and `@école` are all `@école`. `UC…` ids are
+   * case-sensitive and returned unchanged.
+   *
+   * @param {unknown} k
+   * @returns {string|null} e.g. `"@nileblue"` or `"UCxxxxxxxxxxxxxxxxxxxxxx"`
+   */
+  function normalizeKey(k) {
+    if (typeof k !== 'string') return null;
+    let t = k.trim();
+    if (UC_RE.test(t)) return t;
+    if (!t.startsWith('@')) return null;
+    if (t.includes('%')) {
+      try { t = decodeURIComponent(t); } catch { return null; }
+    }
+    t = t.normalize('NFC').toLowerCase();
+    return HANDLE_RE.test(t) ? t : null;
+  }
+
+  /**
+   * @param {unknown} k
+   * @returns {boolean} true for a canonical `UC…` channel id
+   */
+  function isChannelId(k) {
+    return typeof k === 'string' &amp;&amp; UC_RE.test(k);
+  }
+
+  /**
+   * Extracts the channel key from a YouTube link (relative or absolute).
+   * Links to other sites, videos, playlists etc. give null.
+   * @param {string|null|undefined} href
+   * @returns {string|null}
+   */
+  function keyFromHref(href) {
+    if (!href) return null;
+    let u;
+    try { u = new URL(href, 'https://www.youtube.com'); } catch { return null; }
+    if (!/(^|\.)youtube\.com$/.test(u.hostname)) return null;
+    let m = u.pathname.match(/^\/(@[^/?#]+)/);
+    if (m) return normalizeKey(m[1]);
+    m = u.pathname.match(/^\/channel\/(UC[\w-]{22})(?:[/?#]|$)/);
+    return m ? m[1] : null;
+  }
+
+  /**
+   * Reads a stored flag as a vote: 1 = yes, -1 = "not" (you disagree), 0 = no opinion.
+   * Version 0.1 stored booleans, so `true` still means yes.
+   * @param {unknown} x
+   * @returns {number}
+   */
+  function val(x) {
+    if (x === true || x === 1) return 1;
+    if (x === -1) return -1;
+    return 0;
+  }
+
+  /**
+   * Cleans a channel display name: strips control/format characters, trims, caps length.
+   * @param {unknown} s
+   * @returns {string} possibly empty
+   */
+  function cleanName(s) {
+    if (typeof s !== 'string') return '';
+    return s.replace(/[\p{Cc}\p{Cf}]/gu, '').trim().slice(0, LIMITS.MAX_NAME);
+  }
+
+  /**
+   * Validates a sync-server address and returns its canonical base (origin + path,
+   * no trailing slash, no query or hash), or null. Only https is accepted, except
+   * http on localhost / 127.0.0.1 for running the server locally.
+   * @param {unknown} url
+   * @returns {string|null} e.g. `"https://argus.example.workers.dev"`
+   */
+  function serverBase(url) {
+    if (typeof url !== 'string') return null;
+    let u;
+    try { u = new URL(url.trim()); } catch { return null; }
+    const local = u.protocol === 'http:' &amp;&amp; ['localhost', '127.0.0.1'].includes(u.hostname);
+    if (u.protocol !== 'https:' &amp;&amp; !local) return null;
+    return u.origin + u.pathname.replace(/\/+$/, '');
+  }
+
+  /**
+   * Key of one entry in the vote queue: one pending vote per channel and flag.
+   * @param {string} k channel key
+   * @param {string} f flag
+   * @returns {string} e.g. `"@nileblue|ai"`
+   */
+  function queueKey(k, f) {
+    return `${k}|${f}`;
+  }
+
+  /**
+   * Checks one community-list entry: `[aiPct, aiVotes, pePct, peVotes, name?, overrideBits?]`.
+   * @param {unknown} e
+   * @returns {boolean}
+   */
+  function isCommunityEntry(e) {
+    if (!Array.isArray(e) || e.length &lt; 4 || e.length > 6) return false;
+    for (let i = 0; i &lt; 4; i++) if (!Number.isInteger(e[i]) || e[i] &lt; 0 || e[i] > 1e9) return false;
+    if (e.length > 4 &amp;&amp; typeof e[4] !== 'string') return false;
+    if (e.length > 5 &amp;&amp; !(Number.isInteger(e[5]) &amp;&amp; e[5] >= 0 &amp;&amp; e[5] &lt;= 3)) return false;
+    return true;
+  }
+
+  /**
+   * @param {ArrayBuffer|Uint8Array} buf
+   * @returns {string} lowercase hex
+   */
+  function toHex(buf) {
+    const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+    let s = '';
+    for (const b of bytes) s += b.toString(16).padStart(2, '0');
+    return s;
+  }
+
+  /**
+   * SHA-256 of a UTF-8 string, as hex. Uses WebCrypto (browsers, Workers, Node 20+).
+   * @param {string} s
+   * @returns {Promise&lt;string>}
+   */
+  async function sha256hex(s) {
+    return toHex(await root.crypto.subtle.digest('SHA-256', new TextEncoder().encode(s)));
+  }
+
+  /**
+   * Number of leading zero bits in a hex string (proof-of-work difficulty check).
+   * @param {string} hex
+   * @returns {number}
+   */
+  function zeroBits(hex) {
+    let bits = 0;
+    for (const ch of hex) {
+      const v = parseInt(ch, 16);
+      if (v === 0) { bits += 4; continue; }
+      return bits + Math.clz32(v) - 28;
+    }
+    return bits;
+  }
+
+  root.Argus = Object.freeze({
+    FLAGS, MSG, LIMITS,
+    normalizeKey, isChannelId, keyFromHref, val, cleanName, serverBase, queueKey,
+    isCommunityEntry, toHex, sha256hex, zeroBits,
+  });
+})(globalThis);
+</code></pre>
+        </article>
+    </section>
+
+
+
+
+</div>
+
+<nav>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="HttpError.html">HttpError</a></li></ul><h3>Global</h3><ul><li><a href="global.html#A">A</a></li><li><a href="global.html#CACHE_KEY">CACHE_KEY</a></li><li><a href="global.html#CORS_GET">CORS_GET</a></li><li><a href="global.html#DAY">DAY</a></li><li><a href="global.html#HANDLERS">HANDLERS</a></li><li><a href="global.html#IMPORT">IMPORT</a></li><li><a href="global.html#MARK">MARK</a></li><li><a href="global.html#MAX_BATCH">MAX_BATCH</a></li><li><a href="global.html#MAX_BODY">MAX_BODY</a></li><li><a href="global.html#MAX_NAME">MAX_NAME</a></li><li><a href="global.html#MENU">MENU</a></li><li><a href="global.html#POW_MAX_BITS">POW_MAX_BITS</a></li><li><a href="global.html#SYNC_CONFIG">SYNC_CONFIG</a></li><li><a href="global.html#SYNC_NOW">SYNC_NOW</a></li><li><a href="global.html#UPDATE_LIST">UPDATE_LIST</a></li><li><a href="global.html#WIPE">WIPE</a></li><li><a href="global.html#allow">allow</a></li><li><a href="global.html#applyMark">applyMark</a></li><li><a href="global.html#buildMenus">buildMenus</a></li><li><a href="global.html#cfg">cfg</a></li><li><a href="global.html#chunks">chunks</a></li><li><a href="global.html#configureSync">configureSync</a></li><li><a href="global.html#dirtyUserChannels">dirtyUserChannels</a></li><li><a href="global.html#ensureIdentity">ensureIdentity</a></li><li><a href="global.html#expandV6">expandV6</a></li><li><a href="global.html#fetchCommunity">fetchCommunity</a></li><li><a href="global.html#flushQueue">flushQueue</a></li><li><a href="global.html#forget">forget</a></li><li><a href="global.html#get">get</a></li><li><a href="global.html#importData">importData</a></li><li><a href="global.html#json">json</a></li><li><a href="global.html#netHash">netHash</a></li><li><a href="global.html#netOf">netOf</a></li><li><a href="global.html#normalizeShared">normalizeShared</a></li><li><a href="global.html#num">num</a></li><li><a href="global.html#originAllowed">originAllowed</a></li><li><a href="global.html#post">post</a></li><li><a href="global.html#queueVotes">queueVotes</a></li><li><a href="global.html#readJson">readJson</a></li><li><a href="global.html#readMark">readMark</a></li><li><a href="global.html#rebuild">rebuild</a></li><li><a href="global.html#register">register</a></li><li><a href="global.html#safeEqual">safeEqual</a></li><li><a href="global.html#scheduleFlush">scheduleFlush</a></li><li><a href="global.html#score">score</a></li><li><a href="global.html#sendPendingForget">sendPendingForget</a></li><li><a href="global.html#serial">serial</a></li><li><a href="global.html#set">set</a></li><li><a href="global.html#setup">setup</a></li><li><a href="global.html#snapshot">snapshot</a></li><li><a href="global.html#solvePow">solvePow</a></li><li><a href="global.html#syncNow">syncNow</a></li><li><a href="global.html#syncOnce">syncOnce</a></li><li><a href="global.html#unqueue">unqueue</a></li><li><a href="global.html#updateShared">updateShared</a></li><li><a href="global.html#userFromSecret">userFromSecret</a></li><li><a href="global.html#votes">votes</a></li><li><a href="global.html#wipe">wipe</a></li></ul>
+</nav>
+
+<br class="clear">
+
+<footer>
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.5</a>
+</footer>
+
+<script> prettyPrint(); </script>
+<script src="scripts/linenumber.js"> </script>
+</body>
+</html>

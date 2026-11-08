@@ -7,12 +7,15 @@ compatibility_date = "2026-09-01"
 crons = ["*/15 * * * *"]
 
 [vars]
-POW_BITS = "18"          # one-time puzzle when an install registers (~2–10 s in a browser)
-MIN_VOTES = "5"          # weighted votes needed before a mark shows for everyone
-MIN_AGREE = "70"         # % agreement needed
-VOTES_PER_DAY = "500"    # per install
-VOTES_PER_IP_DAY = "3000"
-REG_PER_IP_DAY = "5"     # new installs per network per day
+POW_BITS = "18"            # one-time registration puzzle (capped at 22 by the extension)
+MIN_VOTES = "15"           # weighted votes needed before a mark shows for everyone
+MIN_AGREE = "70"           # % agreement needed
+WARMUP_DAYS = "3"          # new installs carry no weight for this many days
+MAX_PER_NET = "2"          # max counted votes per channel from installs of one network
+VOTES_PER_DAY = "1000"     # per install
+VOTES_PER_NET_DAY = "5000" # per network (IPv6 grouped by /56)
+REG_PER_NET_DAY = "5"      # new installs per network per day
+MAX_PER_RUN = "1800"       # channels recounted per cron run (free plan: 50 queries/run)
 
 [[d1_databases]]
 binding = "DB"

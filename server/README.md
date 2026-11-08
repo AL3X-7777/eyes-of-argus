@@ -5,14 +5,42 @@ A tiny Cloudflare Worker that collects anonymous votes and publishes one communi
 Cloudflare's free plan for a long time.
 
 ## How it works
-- Each install registers once with a random secret and solves a ~1 second puzzle (proof of work),
-  so making thousands of fake installs is slow.
+- Each install registers once with a random secret and solves a one-time puzzle (proof of work,
+  usually a few seconds in a browser). It only slows browsers down, not determined attackers,
+  so the real protection is the rules below.
 - Votes are `+1` (yes), `-1` (not) or `0` (withdraw), per channel and flag (`ai` / `pe`).
 - Every 15 minutes a scheduled job recounts only the channels that changed and patches
-  `snapshot.json`. A flag shows for everyone at **≥ 5 weighted votes and ≥ 70 % agreement**.
-- New installs count as ¼ vote for their first week. Daily limits apply per install and per network.
-  The network is stored only as a salted hash that changes every day.
+  `snapshot.json`. A flag shows for everyone at **≥ 15 weighted votes and ≥ 70 % agreement**.
 - `overrides` table: your manual "always show" / "never show" per channel.
+
+## Threat model
+
+| Attack | Defence |
+|---|---|
+| One person marks a channel with many fake installs | new installs carry **no weight for 3 days**; at most **2 counted votes per channel per network**; at most 5 new installs per network per day; 15 weighted votes needed |
+| A website uses its visitors' browsers to register or vote | POSTs need `application/json` (forces a CORS preflight that is never allowed) and an extension `Origin` (or none) |
+| IPv6 address hopping | networks are grouped by /56 |
+| Huge requests | bodies over 64 KB are refused |
+| Votes lost in races or crashes | `rev` counter, snapshot written before dirty flags are cleared, ETag-guarded writes |
+| Wrong marks | your admin `overrides` table can always hide or force a flag |
+
+Not covered: a determined attacker with many networks over many days. For that, watch the
+`channels` table and use overrides.
+
+## Data kept and for how long
+
+- `users`: anonymous id (hash of the install's secret), creation time, a salted hash of the
+  network it registered from. Deleted with all its votes by `POST /forget`, which the extension
+  sends when you turn sync off and choose to delete your votes.
+- `votes`: channel, flag, yes/no and time, per install.
+- `limits`: daily counters keyed by salted hashes; anything from previous days is deleted on every run.
+- IP addresses themselves are never stored.
+
+## Free-plan budget
+
+- **Recount:** at most 1,800 channels per run, about 42 queries (the free plan allows 50).
+- **Snapshot:** served through the edge cache, and the R2 file is only rewritten when it actually changes.
+- **Downloads:** each install downloads the list about every 6 hours and sends votes as they are made.
 
 ## Run it locally (offline, nothing leaves your PC)
 ```

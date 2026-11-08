@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>JSDoc: Source: src/options.js</title>
+
+    <script src="scripts/prettify/prettify.js"> </script>
+    <script src="scripts/prettify/lang-css.js"> </script>
+    <!--[if lt IE 9]>
+      <script src="//html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+    <link type="text/css" rel="stylesheet" href="styles/prettify-tomorrow.css">
+    <link type="text/css" rel="stylesheet" href="styles/jsdoc-default.css">
+</head>
+
+<body>
+
+<div id="main">
+
+    <h1 class="page-title">Source: src/options.js</h1>
+
+    
+
+
+
+    
+    <section>
+        <article>
+            <pre class="prettyprint source linenums"><code>/**
+ * @file Settings page of The Eyes of Argus.
+ *
+ * Reads everything straight from `storage.local` and re-renders when it changes. It
+ * never writes marks, the vote queue or sync settings itself: those changes are sent
+ * to the background (the single writer, see background.js) as `Argus.MSG` messages.
+ * Display toggles and the shared-list URL are the only keys written here.
+ *
+ * Permission prompts (`permissions.request`) must run directly inside a click, before
+ * any other `await`, or browsers refuse them; every handler below keeps that order.
+ */
+(() => {
+  'use strict';
+
+  const api = globalThis.browser ?? globalThis.chrome;
+  const A = globalThis.Argus;
+  const { FLAGS, MSG } = A;
+  const $ = s => document.querySelector(s);
+  const DEFAULTS = { badges: true, tint: true, dim: false };
+  /** Firefox asks separately for permission to send data (data_collection_permissions). */
+  const IS_FIREFOX = typeof api.runtime.getBrowserInfo === 'function';
+
+  let marks = {};
+  let syncCfg = { enabled: false, server: '' };
+
+  /**
+   * Shows a status line under a section.
+   * @param {Element} el
+   * @param {string} text
+   * @param {'ok'|'err'} [kind]
+   */
+  function setStatus(el, text, kind) {
+    el.textContent = text;
+    el.className = 'muted ' + (kind || '');
+  }
+
+  /**
+   * Sends a message to the background and returns its answer.
+   * @param {Object} msg
+   * @returns {Promise&lt;Object>}
+   */
+  async function ask(msg) {
+    try {
+      return (await api.runtime.sendMessage(msg)) || { ok: false, error: 'no answer' };
+    } catch (e) {
+      return { ok: false, error: String(e?.message || e) };
+    }
+  }
+
+  /**
+   * Asks for permission to talk to a server. Must be called synchronously from a click.
+   * @param {string} origin e.g. `https://example.com`
+   * @param {boolean} sendsData also ask Firefox's data-collection permission
+   * @returns {Promise&lt;boolean>}
+   */
+  function requestAccess(origin, sendsData) {
+    const origins = [origin + '/*'];
+    const request = IS_FIREFOX &amp;&amp; sendsData
+      ? api.permissions.request({ origins, data_collection: ['websiteActivity'] })
+        .catch(() => api.permissions.request({ origins }))
+      : api.permissions.request({ origins });
+    return request.catch(() => false);
+  }
+
+  /** @param {number|undefined} t @returns {string} */
+  const fmtTime = t => (t ? new Date(t).toLocaleString() : 'never');
+
+  // ---------------------------------------------------------------------------
+  // Display settings
+  // ---------------------------------------------------------------------------
+
+  async function loadSettings() {
+    const { settings = {} } = await api.storage.local.get('settings');
+    const s = { ...DEFAULTS, ...settings };
+    for (const box of document.querySelectorAll('[data-setting]')) {
+      box.checked = !!s[box.dataset.setting];
+      box.addEventListener('change', async () => {
+        const { settings: cur = {} } = await api.storage.local.get('settings');
+        await api.storage.local.set({ settings: { ...DEFAULTS, ...cur, [box.dataset.setting]: box.checked } });
+      });
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Your marks
+  // ---------------------------------------------------------------------------
+
+  /** @param {string} key @returns {string} the channel's YouTube address */
+  const channelUrl = key => (key.startsWith('@') ? `https://www.youtube.com/${key}` : `https://www.youtube.com/channel/${key}`);
+
+  /** Renders the marks table (built with DOM methods only, never innerHTML). */
+  function render() {
+    const q = $('#search').value.trim().toLowerCase();
+    const tbody = $('#marks tbody');
+    tbody.textContent = '';
+    const all = Object.entries(marks).filter(([, v]) => A.val(v.ai) || A.val(v.pe));
+    $('#count').textContent = all.length;
+    $('#empty').hidden = all.length > 0;
+
+    const rows = all
+      .filter(([k, v]) => !q || k.includes(q) || (v.name || '').toLowerCase().includes(q))
+      .sort((a, b) => (b[1].t || 0) - (a[1].t || 0));
+
+    const frag = document.createDocumentFragment();
+    for (const [key, v] of rows) {
+      const name = v.name || key;
+      const tr = document.createElement('tr');
+
+      const td = document.createElement('td');
+      const a = document.createElement('a');
+      a.href = channelUrl(key); a.target = '_blank'; a.rel = 'noreferrer';
+      a.textContent = name;
+      const k = document.createElement('span');
+      k.className = 'k'; k.textContent = key;
+      td.append(a, k);
+      tr.append(td);
+
+      for (const flag of FLAGS) {
+        const c = document.createElement('td');
+        const sel = document.createElement('select');
+        for (const [value, label] of [['0', '–'], ['1', 'Yes'], ['-1', 'Not']]) sel.add(new Option(label, value));
+        const cur = A.val(v[flag]);
+        sel.value = String(cur);
+        sel.className = `${flag} ${cur > 0 ? 'yes' : cur &lt; 0 ? 'no' : ''}`;
+        sel.setAttribute('aria-label', `${flag === 'ai' ? 'Uses AI' : 'Private-equity owned'}: ${name}`);
+        sel.addEventListener('change', () => ask({ type: MSG.MARK, key, changes: { [flag]: Number(sel.value) } }));
+        c.append(sel); tr.append(c);
+      }
+
+      const del = document.createElement('td');
+      const x = document.createElement('button');
+      x.className = 'x'; x.textContent = '✕';
+      x.setAttribute('aria-label', `Remove mark for ${name}`);
+      x.addEventListener('click', () => ask({ type: MSG.MARK, key, changes: { ai: 0, pe: 0 } }));
+      del.append(x); tr.append(del);
+
+      frag.append(tr);
+    }
+    tbody.append(frag);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Community sync
+  // ---------------------------------------------------------------------------
+
+  async function renderSync() {
+    const d = await api.storage.local.get(['sync', 'queue', 'syncStatus', 'communityMeta', 'identity', 'pendingForget']);
+    syncCfg = { enabled: false, server: '', ...(d.sync || {}) };
+    $('#syncEnabled').checked = syncCfg.enabled;
+    if (document.activeElement !== $('#syncServer')) $('#syncServer').value = syncCfg.server;
+    $('#syncPill').textContent = syncCfg.enabled ? 'On' : 'Off';
+    $('#syncPill').classList.toggle('on', syncCfg.enabled);
+    if (!syncCfg.enabled) {
+      const extra = d.pendingForget ? ' Your votes will be deleted from the server the next time you\'re online.' : '';
+      return setStatus($('#syncStatus'), 'Sync is off. Your marks stay on this computer.' + extra);
+    }
+    const queued = Object.keys(d.queue || {}).length;
+    const parts = [queued ? `${queued} vote${queued > 1 ? 's' : ''} waiting to be sent` : 'All votes sent'];
+    if (d.communityMeta) parts.push(`community list: ${d.communityMeta.count} channels`);
+    parts.push(`last sync: ${fmtTime(d.syncStatus?.at)}`);
+    if (d.identity?.id) parts.push(`your anonymous ID: ${d.identity.id.slice(0, 8)}…`);
+    const s = d.syncStatus;
+    if (s &amp;&amp; !s.ok &amp;&amp; s.error) parts.push(`last problem: ${s.error} (will retry)`);
+    setStatus($('#syncStatus'), parts.join(' · '), s &amp;&amp; !s.ok ? 'err' : 'ok');
+  }
+
+  /**
+   * Turns sync on for the address in the box (asks for permission first).
+   * @param {HTMLInputElement|null} box the toggle, unticked again on failure
+   */
+  async function enableSync(box) {
+    const server = A.serverBase($('#syncServer').value);
+    if (!server) {
+      if (box) box.checked = false;
+      return setStatus($('#syncStatus'), 'Enter the sync server address first (it must start with https://).', 'err');
+    }
+    const old = syncCfg.server &amp;&amp; A.serverBase(syncCfg.server);
+    if (!(await requestAccess(new URL(server).origin, true))) { // first await: still inside the click
+      if (box) box.checked = false;
+      return setStatus($('#syncStatus'), 'Permission to reach that server was refused.', 'err');
+    }
+    setStatus($('#syncStatus'), 'Syncing… (the first time includes a one-time puzzle, usually a few seconds)');
+    const res = await ask({ type: MSG.SYNC_CONFIG, enabled: true, server });
+    if (!res.ok) { if (box) box.checked = false; return setStatus($('#syncStatus'), res.error, 'err'); }
+    if (old &amp;&amp; new URL(old).origin !== new URL(server).origin) dropAccess(old);
+  }
+
+  /**
+   * Gives back permission for a server that is no longer used (unless the shared list uses it).
+   * @param {string} base
+   */
+  async function dropAccess(base) {
+    const { listUrl } = await api.storage.local.get('listUrl');
+    const origin = new URL(base).origin;
+    if (listUrl &amp;&amp; new URL(listUrl).origin === origin) return;
+    api.permissions.remove({ origins: [origin + '/*'] }).catch(() => {});
+  }
+
+  $('#syncEnabled').addEventListener('change', async e => {
+    const box = e.target;
+    if (box.checked) return enableSync(box);
+    const withdraw = confirm('Turn off community sync.\n\nAlso delete all your votes from the sync server?\n(OK = delete them, Cancel = keep them)');
+    await ask({ type: MSG.SYNC_CONFIG, enabled: false, withdraw });
+  });
+
+  $('#saveServer').addEventListener('click', () => {
+    if (syncCfg.enabled) return enableSync(null);
+    const server = A.serverBase($('#syncServer').value);
+    if (!server) return setStatus($('#syncStatus'), 'That isn\'t a valid server address (it must start with https://).', 'err');
+    setStatus($('#syncStatus'), 'Address saved. Turn on community sync to use it.', 'ok');
+    $('#syncServer').value = server;
+    syncCfg.server = server;
+  });
+
+  $('#syncNow').addEventListener('click', async () => {
+    if (!syncCfg.enabled) return setStatus($('#syncStatus'), 'Turn on community sync first.', 'err');
+    setStatus($('#syncStatus'), 'Syncing…');
+    await ask({ type: MSG.SYNC_NOW });
+    renderSync();
+  });
+
+  // ---------------------------------------------------------------------------
+  // Shared list
+  // ---------------------------------------------------------------------------
+
+  function showListInfo(sharedList, listUrl) {
+    if (!listUrl) return setStatus($('#listStatus'), 'No shared list.');
+    if (!sharedList) return setStatus($('#listStatus'), 'Not downloaded yet.');
+    setStatus($('#listStatus'), `${sharedList.count} channels · last updated ${fmtTime(sharedList.updated)}`, 'ok');
+  }
+
+  $('#saveList').addEventListener('click', async () => {
+    const url = $('#listUrl').value.trim();
+    if (!url) {
+      await api.storage.local.remove(['listUrl', 'sharedList']);
+      return setStatus($('#listStatus'), 'Shared list removed.');
+    }
+    let origin;
+    try { origin = new URL(url).origin; } catch { return setStatus($('#listStatus'), 'That isn\'t a valid URL.', 'err'); }
+    if (!url.startsWith('https://')) return setStatus($('#listStatus'), 'The URL must start with https://', 'err');
+    if (!(await requestAccess(origin, false))) return setStatus($('#listStatus'), 'Permission to read that site was refused.', 'err');
+
+    await api.storage.local.set({ listUrl: url });
+    setStatus($('#listStatus'), 'Downloading…');
+    const res = await ask({ type: MSG.UPDATE_LIST });
+    if (res.ok) setStatus($('#listStatus'), `Loaded ${res.count} channels.`, 'ok');
+    else setStatus($('#listStatus'), `Couldn't download: ${res.error || 'unknown error'} (the last copy is still used)`, 'err');
+  });
+
+  // ---------------------------------------------------------------------------
+  // Export / import / wipe
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Builds the export file. `channels` keeps the simple shared-list format (only "yes"
+   * marks, so the file also works as a shared list); `mine` is the exact backup,
+   * including "Not" choices and UC ids.
+   * @returns {{app: string, version: number, exported: string, channels: Object, mine: Object}}
+   */
+  function buildExport() {
+    const channels = {}, mine = {};
+    for (const [k, v] of Object.entries(marks)) {
+      const ai = A.val(v.ai), pe = A.val(v.pe);
+      if (!ai &amp;&amp; !pe) continue;
+      const name = v.name || k;
+      if (ai > 0 || pe > 0) channels[k] = { ai: ai > 0, pe: pe > 0, name };
+      mine[k] = { ai, pe, name, ...(v.uc ? { uc: v.uc } : {}) };
+    }
+    return { app: 'eyes-of-argus', version: 2, exported: new Date().toISOString(), channels, mine };
+  }
+
+  $('#export').addEventListener('click', () => {
+    const data = buildExport();
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `argus-marks-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    setStatus($('#ioStatus'), `Exported ${Object.keys(data.mine).length} channels.`, 'ok');
+  });
+
+  $('#importBtn').addEventListener('click', () => $('#importFile').click());
+  $('#importFile').addEventListener('change', async e => {
+    const file = e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+    let data;
+    try { data = JSON.parse(await file.text()); } catch { return setStatus($('#ioStatus'), 'Import failed: the file isn\'t valid JSON.', 'err'); }
+    const res = await ask({ type: MSG.IMPORT, data });
+    if (res.ok) setStatus($('#ioStatus'), `Imported ${res.count} channels.`, 'ok');
+    else setStatus($('#ioStatus'), `Import failed: ${res.error}`, 'err');
+  });
+
+  $('#wipe').addEventListener('click', async () => {
+    if (!confirm('Delete all of your marks? This can\'t be undone (export first if you want a backup).')) return;
+    await ask({ type: MSG.WIPE });
+    setStatus($('#ioStatus'), 'All marks deleted.');
+  });
+
+  // ---------------------------------------------------------------------------
+  // Start
+  // ---------------------------------------------------------------------------
+
+  $('#search').addEventListener('input', render);
+
+  api.storage.onChanged.addListener((ch, area) => {
+    if (area !== 'local') return;
+    if (ch.marks) { marks = ch.marks.newValue || {}; render(); }
+    if (ch.sharedList || ch.listUrl) api.storage.local.get(['sharedList', 'listUrl']).then(d => showListInfo(d.sharedList, d.listUrl));
+    if (ch.sync || ch.queue || ch.syncStatus || ch.communityMeta || ch.identity || ch.pendingForget) renderSync();
+  });
+
+  (async () => {
+    await loadSettings();
+    const d = await api.storage.local.get(['marks', 'sharedList', 'listUrl']);
+    marks = d.marks || {};
+    $('#listUrl').value = d.listUrl || '';
+    showListInfo(d.sharedList, d.listUrl);
+    await renderSync();
+    render();
+    if (location.hash === '#help') $('#help').scrollIntoView();
+  })();
+
+  // Exposed for tests only.
+  globalThis.__argusOptions = { buildExport };
+})();
+</code></pre>
+        </article>
+    </section>
+
+
+
+
+</div>
+
+<nav>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="HttpError.html">HttpError</a></li></ul><h3>Global</h3><ul><li><a href="global.html#A">A</a></li><li><a href="global.html#CACHE_KEY">CACHE_KEY</a></li><li><a href="global.html#CORS_GET">CORS_GET</a></li><li><a href="global.html#DAY">DAY</a></li><li><a href="global.html#HANDLERS">HANDLERS</a></li><li><a href="global.html#IMPORT">IMPORT</a></li><li><a href="global.html#MARK">MARK</a></li><li><a href="global.html#MAX_BATCH">MAX_BATCH</a></li><li><a href="global.html#MAX_BODY">MAX_BODY</a></li><li><a href="global.html#MAX_NAME">MAX_NAME</a></li><li><a href="global.html#MENU">MENU</a></li><li><a href="global.html#POW_MAX_BITS">POW_MAX_BITS</a></li><li><a href="global.html#SYNC_CONFIG">SYNC_CONFIG</a></li><li><a href="global.html#SYNC_NOW">SYNC_NOW</a></li><li><a href="global.html#UPDATE_LIST">UPDATE_LIST</a></li><li><a href="global.html#WIPE">WIPE</a></li><li><a href="global.html#allow">allow</a></li><li><a href="global.html#applyMark">applyMark</a></li><li><a href="global.html#buildMenus">buildMenus</a></li><li><a href="global.html#cfg">cfg</a></li><li><a href="global.html#chunks">chunks</a></li><li><a href="global.html#configureSync">configureSync</a></li><li><a href="global.html#dirtyUserChannels">dirtyUserChannels</a></li><li><a href="global.html#ensureIdentity">ensureIdentity</a></li><li><a href="global.html#expandV6">expandV6</a></li><li><a href="global.html#fetchCommunity">fetchCommunity</a></li><li><a href="global.html#flushQueue">flushQueue</a></li><li><a href="global.html#forget">forget</a></li><li><a href="global.html#get">get</a></li><li><a href="global.html#importData">importData</a></li><li><a href="global.html#json">json</a></li><li><a href="global.html#netHash">netHash</a></li><li><a href="global.html#netOf">netOf</a></li><li><a href="global.html#normalizeShared">normalizeShared</a></li><li><a href="global.html#num">num</a></li><li><a href="global.html#originAllowed">originAllowed</a></li><li><a href="global.html#post">post</a></li><li><a href="global.html#queueVotes">queueVotes</a></li><li><a href="global.html#readJson">readJson</a></li><li><a href="global.html#readMark">readMark</a></li><li><a href="global.html#rebuild">rebuild</a></li><li><a href="global.html#register">register</a></li><li><a href="global.html#safeEqual">safeEqual</a></li><li><a href="global.html#scheduleFlush">scheduleFlush</a></li><li><a href="global.html#score">score</a></li><li><a href="global.html#sendPendingForget">sendPendingForget</a></li><li><a href="global.html#serial">serial</a></li><li><a href="global.html#set">set</a></li><li><a href="global.html#setup">setup</a></li><li><a href="global.html#snapshot">snapshot</a></li><li><a href="global.html#solvePow">solvePow</a></li><li><a href="global.html#syncNow">syncNow</a></li><li><a href="global.html#syncOnce">syncOnce</a></li><li><a href="global.html#unqueue">unqueue</a></li><li><a href="global.html#updateShared">updateShared</a></li><li><a href="global.html#userFromSecret">userFromSecret</a></li><li><a href="global.html#votes">votes</a></li><li><a href="global.html#wipe">wipe</a></li></ul>
+</nav>
+
+<br class="clear">
+
+<footer>
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.5</a>
+</footer>
+
+<script> prettyPrint(); </script>
+<script src="scripts/linenumber.js"> </script>
+</body>
+</html>

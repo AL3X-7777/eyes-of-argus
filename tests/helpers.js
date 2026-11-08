@@ -73,6 +73,9 @@ function fakeApi(storage) {
 function youtubePage(html, storage, url = 'https://www.youtube.com/') {
   const dom = new JSDOM(`<!doctype html><html><head></head><body>${html}</body></html>`, { url, runScripts: 'outside-only' });
   const api = fakeApi(storage);
+  // Content scripts ask the background (the single writer) to change marks
+  const bg = loadBackground(storage);
+  api.runtime.sendMessage = msg => bg.ask(msg);
   dom.window.chrome = api;
   for (const f of CONTENT_SCRIPTS) dom.window.eval(fs.readFileSync(path.join(SRC, f), 'utf8'));
   const $ = id => dom.window.document.getElementById(id);
@@ -82,7 +85,7 @@ function youtubePage(html, storage, url = 'https://www.youtube.com/') {
     for (const f of api.runtime.onMessage.fns) f({ type: 'argus-menu', action });
     await wait(80);
   };
-  return { dom, window: dom.window, api, $, menu };
+  return { dom, window: dom.window, api, $, menu, bg };
 }
 
 /** Loads background scripts into a sandboxed global with the given storage. */
@@ -111,7 +114,7 @@ async function startServer(port = 8790) {
   const wrangler = path.join(serverDir, 'node_modules', '.bin', 'wrangler');
   const common = ['--persist-to', persist];
   execFileSync(wrangler, ['d1', 'execute', 'argus', '--local', ...common, '--file', 'schema.sql'], { cwd: serverDir, stdio: 'ignore' });
-  const vars = { POW_BITS: '10', MIN_VOTES: '2', SALT: 'test-salt', ADMIN_TOKEN: 'test-admin', REG_PER_IP_DAY: '50' };
+  const vars = { POW_BITS: '10', MIN_VOTES: '2', SALT: 'test-salt', ADMIN_TOKEN: 'test-admin', REG_PER_NET_DAY: '50' };
   const args = ['dev', '--port', String(port), '--test-scheduled', '--ip', '127.0.0.1', ...common];
   for (const [k, v] of Object.entries(vars)) args.push('--var', `${k}:${v}`);
   const proc = spawn(wrangler, args, { cwd: serverDir, stdio: ['ignore', 'pipe', 'pipe'] });

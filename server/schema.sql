@@ -1,9 +1,10 @@
 -- The Eyes of Argus — D1 (SQLite) schema
 
--- Anonymous installs. id = first 32 hex chars of sha256(secret); the secret never gets stored.
+-- Anonymous installs (deleted with all their votes by POST /forget). id = first 32 hex chars of sha256(secret); the secret never gets stored.
 CREATE TABLE IF NOT EXISTS users (
   id         TEXT PRIMARY KEY,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  reg_net    TEXT              -- salted hash of the network it registered from (caps same-network votes)
 );
 
 -- One row per user, channel and flag. Changing a vote overwrites; withdrawing deletes.
@@ -26,6 +27,7 @@ CREATE TABLE IF NOT EXISTS channels (
   pe_pct     INTEGER NOT NULL DEFAULT 0,
   pe_n       INTEGER NOT NULL DEFAULT 0,
   dirty      INTEGER NOT NULL DEFAULT 1,
+  rev        INTEGER NOT NULL DEFAULT 0,      -- bumped on every vote; a recount only clears dirty if unchanged
   updated_at INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS channels_dirty ON channels (dirty);

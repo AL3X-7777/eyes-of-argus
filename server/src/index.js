@@ -1,65 +1,65 @@
-// The Eyes of Argus — sync server (Cloudflare Worker + D1 + R2)
-//
-//   GET  /config          proof-of-work difficulty and thresholds
-//   POST /register        { secret, nonce }            -> { id }
-//   POST /votes           { secret, votes: [{k, f, v, name}] }
-//   GET  /snapshot.json   community list (cached, supports ETag)
-//   POST /admin/rebuild   Authorization: Bearer <ADMIN_TOKEN>  -> full snapshot rebuild
-//   cron                  every 15 min: recount changed channels, patch snapshot
+/**
+ * @file The Eyes of Argus sync server (Cloudflare Worker + D1 + R2).
+ *
+ * | Route                | What it does |
+ * |----------------------|--------------|
+ * | `GET  /config`       | puzzle difficulty and thresholds |
+ * | `GET  /snapshot.json`| the community list (ETag, edge cache) |
+ * | `POST /register`     | `{secret, nonce}` → `{id}`: anonymous install, proof of work |
+ * | `POST /votes`        | `{secret, votes:[{k,f,v,name}], replace?}` |
+ * | `POST /forget`       | `{secret}`: delete all of this install's votes and the install |
+ * | `POST /admin/rebuild`| `Authorization: Bearer <ADMIN_TOKEN>`: recount everything |
+ * | cron (15 min)        | recount changed channels, patch the snapshot |
+ *
+ * Abuse resistance (see server/README.md, "Threat model"): POSTs only from extensions
+ * or non-browser clients; daily limits per install and per network (IPv6 grouped by
+ * /56); new installs carry no weight for their first days; at most `MAX_PER_NET`
+ * votes per channel count from installs registered on the same network.
+ */
+import { A, DAY, cfg, netOf, originAllowed, readJson, safeEqual, chunks, score } from './lib.js';
 
 const SNAPSHOT = 'snapshot.json';
-const DAY = 86400e3;
-const NEW_USER_MS = 7 * DAY;     // new installs count as 1/4 vote for their first week
-const NEW_USER_WEIGHT = 0.25;
-const MAX_BATCH = 100;
+/** Fixed edge-cache key for the snapshot, so a rebuild can invalidate it. */
+const CACHE_KEY = 'https://argus.cache/snapshot.json';
 
-const CORS = {
+/** CORS only for reading; POST routes are for the extension, which needs no CORS. */
+const CORS_GET = {
   'access-control-allow-origin': '*',
-  'access-control-allow-methods': 'GET, POST, OPTIONS',
-  'access-control-allow-headers': 'content-type, if-none-match',
+  'access-control-allow-methods': 'GET, OPTIONS',
+  'access-control-allow-headers': 'if-none-match',
   'access-control-expose-headers': 'etag',
 };
 
-const json = (data, status = 200) =>
-  new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json', ...CORS } });
-
-const num = (v, d) => (Number.isFinite(+v) ? +v : d);
-
-function cfg(env) {
-  return {
-    powBits: num(env.POW_BITS, 18),
-    minVotes: num(env.MIN_VOTES, 5),
-    minAgree: num(env.MIN_AGREE, 70),
-    votesPerDay: num(env.VOTES_PER_DAY, 500),
-    votesPerIpDay: num(env.VOTES_PER_IP_DAY, 3000),
-    regPerIpDay: num(env.REG_PER_IP_DAY, 5),
-  };
-}
-
-// ---------- small helpers ----------
-async function sha256hex(s) {
-  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
-  return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
-}
-
-function zeroBits(hex) {
-  let bits = 0;
-  for (const ch of hex) {
-    const v = parseInt(ch, 16);
-    if (v === 0) { bits += 4; continue; }
-    return bits + Math.clz32(v) - 28;
-  }
-  return bits;
-}
+/**
+ * @param {any} data
+ * @param {number} [status]
+ * @param {Object} [headers]
+ */
+const json = (data, status = 200, headers = {}) =>
+  new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json', ...headers } });
 
 const today = () => Math.floor(Date.now() / DAY);
 
-async function ipHash(req, env) {
-  const ip = req.headers.get('cf-connecting-ip') || 'local';
-  return (await sha256hex(`${ip}|${today()}|${env.SALT || 'dev-salt'}`)).slice(0, 24);
+/**
+ * Salted hash of the caller's network. With `daily`, the hash changes every day
+ * (used for rate limits); without, it is stable (stored with an install to cap how
+ * many installs from one network can count on the same channel).
+ * @param {Request} req
+ * @param {Object} env
+ * @param {boolean} daily
+ */
+async function netHash(req, env, daily) {
+  const net = netOf(req.headers.get('cf-connecting-ip') || 'local');
+  return (await A.sha256hex(`${net}|${daily ? today() : 'reg'}|${env.SALT || 'dev-salt'}`)).slice(0, 24);
 }
 
-// Adds `amount` to a daily counter; returns false when the limit is passed.
+/**
+ * Adds `amount` to a daily counter; false once the limit is passed.
+ * @param {Object} env
+ * @param {string} bucket
+ * @param {number} amount
+ * @param {number} limit
+ */
 async function allow(env, bucket, amount, limit) {
   const row = await env.DB.prepare(
     `INSERT INTO limits (bucket, day, n) VALUES (?1, ?2, ?3)
@@ -69,207 +69,245 @@ async function allow(env, bucket, amount, limit) {
   return row.n <= limit;
 }
 
-const validKey = k =>
-  typeof k === 'string' && (/^@[^\s/?#]{1,100}$/.test(k) || /^UC[\w-]{22}$/.test(k));
-
-const normKey = k => (typeof k === 'string' && k.startsWith('@') ? k.toLowerCase() : k);
-
-async function body(req) {
-  try { return await req.json(); } catch { return null; }
-}
-
+/**
+ * Looks up the install that owns `secret`.
+ * @param {Object} env
+ * @param {unknown} secret 64 hex characters
+ * @returns {Promise<{id: string, created_at: number}|null>}
+ */
 async function userFromSecret(env, secret) {
   if (typeof secret !== 'string' || !/^[0-9a-f]{64}$/.test(secret)) return null;
-  const id = (await sha256hex(secret)).slice(0, 32);
-  const u = await env.DB.prepare('SELECT id, created_at FROM users WHERE id = ?').bind(id).first();
-  return u || null;
+  const id = (await A.sha256hex(secret)).slice(0, 32);
+  return env.DB.prepare('SELECT id, created_at FROM users WHERE id = ?').bind(id).first();
 }
 
-// ---------- handlers ----------
-async function register(req, env) {
+/** Marks every channel this user voted on as needing a recount. */
+const dirtyUserChannels = (env, id) => env.DB.prepare(
+  'UPDATE channels SET dirty = 1, rev = rev + 1 WHERE key IN (SELECT channel_key FROM votes WHERE user_id = ?)'
+).bind(id);
+
+// ---------------------------------------------------------------------------
+// Handlers
+// ---------------------------------------------------------------------------
+
+/** `POST /register` */
+async function register(req, env, body) {
   const c = cfg(env);
-  const b = await body(req);
-  const secret = b?.secret, nonce = String(b?.nonce ?? '');
-  if (typeof secret !== 'string' || !/^[0-9a-f]{64}$/.test(secret) || nonce.length > 32)
+  const secret = body?.secret, nonce = String(body?.nonce ?? '');
+  if (typeof secret !== 'string' || !/^[0-9a-f]{64}$/.test(secret) || nonce.length > 32) {
     return json({ error: 'bad request' }, 400);
+  }
+  const id = (await A.sha256hex(secret)).slice(0, 32);
+  if (A.zeroBits(await A.sha256hex(`${id}:${nonce}`)) < c.powBits) return json({ error: 'proof of work too weak' }, 400);
 
-  const id = (await sha256hex(secret)).slice(0, 32);
-  if (zeroBits(await sha256hex(`${id}:${nonce}`)) < c.powBits)
-    return json({ error: 'proof of work too weak' }, 400);
-
-  const existing = await env.DB.prepare('SELECT id FROM users WHERE id = ?').bind(id).first();
-  if (existing) return json({ id });
-
-  if (!(await allow(env, 'reg:' + (await ipHash(req, env)), 1, c.regPerIpDay)))
+  if (await env.DB.prepare('SELECT 1 FROM users WHERE id = ?').bind(id).first()) return json({ id });
+  if (!(await allow(env, 'reg:' + (await netHash(req, env, true)), 1, c.regPerNetDay))) {
     return json({ error: 'too many registrations from this network today' }, 429);
-
-  await env.DB.prepare('INSERT OR IGNORE INTO users (id, created_at) VALUES (?, ?)').bind(id, Date.now()).run();
+  }
+  await env.DB.prepare('INSERT OR IGNORE INTO users (id, created_at, reg_net) VALUES (?, ?, ?)')
+    .bind(id, Date.now(), await netHash(req, env, false)).run();
   return json({ id });
 }
 
-async function votes(req, env) {
+/** `POST /votes` (with `replace: true`, first deletes all of this install's votes) */
+async function votes(req, env, body) {
   const c = cfg(env);
-  const b = await body(req);
-  if (!b || !Array.isArray(b.votes) || b.votes.length === 0 || b.votes.length > MAX_BATCH)
+  const replace = body?.replace === true;
+  if (!body || !Array.isArray(body.votes) || body.votes.length > A.LIMITS.MAX_BATCH || (!body.votes.length && !replace)) {
     return json({ error: 'bad request' }, 400);
-
-  const user = await userFromSecret(env, b.secret);
+  }
+  const user = await userFromSecret(env, body.secret);
   if (!user) return json({ error: 'unknown user, register first' }, 401);
 
   const clean = [];
-  for (const v of b.votes) {
-    const k = normKey(v?.k);
-    if (!validKey(k) || !['ai', 'pe'].includes(v?.f) || ![-1, 0, 1].includes(v?.v)) continue;
-    const name = typeof v.name === 'string' ? v.name.trim().slice(0, 100) || null : null;
-    clean.push({ k, f: v.f, v: v.v, name });
+  for (const v of body.votes) {
+    const k = A.normalizeKey(v?.k);
+    if (!k || !A.FLAGS.includes(v?.f) || ![-1, 0, 1].includes(v?.v)) continue;
+    clean.push({ k, f: v.f, v: v.v, name: A.cleanName(v.name) || null });
   }
-  if (!clean.length) return json({ error: 'no valid votes' }, 400);
+  if (!clean.length && !replace) return json({ error: 'no valid votes' }, 400);
 
-  if (!(await allow(env, 'vote:' + user.id, clean.length, c.votesPerDay)))
-    return json({ error: 'daily vote limit reached' }, 429);
-  if (!(await allow(env, 'vote-ip:' + (await ipHash(req, env)), clean.length, c.votesPerIpDay)))
+  const amount = Math.max(clean.length, 1);
+  if (!(await allow(env, 'vote:' + user.id, amount, c.votesPerDay))) return json({ error: 'daily vote limit reached' }, 429);
+  if (!(await allow(env, 'vote-net:' + (await netHash(req, env, true)), amount, c.votesPerNetDay))) {
     return json({ error: 'daily vote limit reached for this network' }, 429);
+  }
 
   const now = Date.now();
   const stmts = [];
+  if (replace) {
+    stmts.push(dirtyUserChannels(env, user.id));
+    stmts.push(env.DB.prepare('DELETE FROM votes WHERE user_id = ?').bind(user.id));
+  }
   for (const v of clean) {
     stmts.push(v.v === 0
-      ? env.DB.prepare('DELETE FROM votes WHERE user_id = ? AND channel_key = ? AND flag = ?')
-          .bind(user.id, v.k, v.f)
+      ? env.DB.prepare('DELETE FROM votes WHERE user_id = ? AND channel_key = ? AND flag = ?').bind(user.id, v.k, v.f)
       : env.DB.prepare(
-          `INSERT INTO votes (user_id, channel_key, flag, value, updated_at) VALUES (?, ?, ?, ?, ?)
-           ON CONFLICT(user_id, channel_key, flag) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
-        ).bind(user.id, v.k, v.f, v.v, now));
+        `INSERT INTO votes (user_id, channel_key, flag, value, updated_at) VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(user_id, channel_key, flag) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
+      ).bind(user.id, v.k, v.f, v.v, now));
+    // The first name a channel was seen with is kept, so voters can't rename channels.
     stmts.push(env.DB.prepare(
-      `INSERT INTO channels (key, name, dirty, updated_at) VALUES (?, ?, 1, ?)
-       ON CONFLICT(key) DO UPDATE SET dirty = 1, name = COALESCE(excluded.name, channels.name)`
+      `INSERT INTO channels (key, name, dirty, rev, updated_at) VALUES (?, ?, 1, 1, ?)
+       ON CONFLICT(key) DO UPDATE SET dirty = 1, rev = channels.rev + 1, name = COALESCE(channels.name, excluded.name)`
     ).bind(v.k, v.name, now));
   }
   await env.DB.batch(stmts);
   return json({ ok: true, accepted: clean.length });
 }
 
-async function snapshot(req, env) {
-  const obj = await env.BUCKET.get(SNAPSHOT);
-  if (!obj) return json({ v: 1, generated: 0, c: {} });
-  const etag = obj.httpEtag;
-  const headers = { ...CORS, etag, 'content-type': 'application/json', 'cache-control': 'public, max-age=600' };
-  if (req.headers.get('if-none-match') === etag) return new Response(null, { status: 304, headers });
-  return new Response(obj.body, { headers });
+/** `POST /forget`: deletes the install and everything it voted. */
+async function forget(_req, env, body) {
+  const user = await userFromSecret(env, body?.secret);
+  if (!user) return json({ ok: true, deleted: false });
+  await env.DB.batch([
+    dirtyUserChannels(env, user.id),
+    env.DB.prepare('DELETE FROM votes WHERE user_id = ?').bind(user.id),
+    env.DB.prepare('DELETE FROM users WHERE id = ?').bind(user.id),
+  ]);
+  return json({ ok: true, deleted: true });
 }
 
-// ---------- recount + snapshot ----------
-function chunks(arr, n) {
-  const out = [];
-  for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n));
-  return out;
+/** `GET /snapshot.json`: edge cache in front of R2, conditional requests → 304. */
+async function snapshot(req, env, ctx) {
+  const inm = req.headers.get('if-none-match');
+  const cacheKey = new Request(CACHE_KEY);
+  const cache = globalThis.caches?.default;
+  let res = cache && (await cache.match(cacheKey));
+  if (!res) {
+    const obj = await env.BUCKET.get(SNAPSHOT);
+    if (!obj) return json({ v: 1, generated: 0, c: {} }, 200, CORS_GET);
+    res = new Response(obj.body, {
+      headers: { 'content-type': 'application/json', etag: obj.httpEtag, 'cache-control': 'public, max-age=300', ...CORS_GET },
+    });
+    if (cache) ctx.waitUntil(cache.put(cacheKey, res.clone()));
+  }
+  if (inm && inm === res.headers.get('etag')) return new Response(null, { status: 304, headers: res.headers });
+  return res;
 }
 
-async function rebuild(env, full) {
+// ---------------------------------------------------------------------------
+// Recount
+// ---------------------------------------------------------------------------
+
+/**
+ * Recounts channels marked dirty and patches the snapshot.
+ *
+ * Safe against crashes and concurrent votes:
+ * - at most `MAX_PER_RUN` channels per run (stays under the free plan's 50 queries per
+ *   invocation: 2 + 2 per 90-channel chunk);
+ * - the snapshot is written to R2 **before** any `dirty` flag is cleared, with an ETag
+ *   condition so two rebuilds can't overwrite each other;
+ * - `dirty` is only cleared if `rev` is unchanged, so a vote that arrives during the
+ *   recount keeps its channel dirty for the next run.
+ *
+ * @param {Object} env
+ * @returns {Promise<{changed: number, total: number, conflict: boolean}>}
+ */
+async function rebuild(env) {
   const c = cfg(env);
   const now = Date.now();
-
-  const { results: rows } = await env.DB.prepare(
-    full ? 'SELECT key FROM channels' : 'SELECT key FROM channels WHERE dirty = 1 LIMIT 5000'
-  ).all();
-  const keys = rows.map(r => r.key);
-
-  // Rate-limit counters from previous days are no longer needed.
   await env.DB.prepare('DELETE FROM limits WHERE day < ?').bind(today()).run();
-  if (!keys.length && !full) return { changed: 0 };
+  const { results: dirty } = await env.DB.prepare('SELECT key, rev FROM channels WHERE dirty = 1 LIMIT ?').bind(c.maxPerRun).all();
+  if (!dirty.length) return { changed: 0 };
 
+  const obj = await env.BUCKET.get(SNAPSHOT);
   let snap = { v: 1, generated: 0, c: {} };
-  if (!full) {
-    const obj = await env.BUCKET.get(SNAPSHOT);
-    if (obj) { try { snap = await obj.json(); } catch { /* start fresh */ } }
-  }
+  if (obj) { try { snap = await obj.json(); } catch { /* corrupt: start fresh */ } }
+  const before = JSON.stringify(snap.c);
 
-  for (const part of chunks(keys, 90)) {
-    const ph = part.map(() => '?').join(',');
+  const updates = [];
+  for (const part of chunks(dirty, 90)) {
+    const keys = part.map(r => r.key);
+    const ph = keys.map((_, i) => `?${i + 3}`).join(',');
     const [tallies, overrides, names] = await env.DB.batch([
       env.DB.prepare(
-        `SELECT v.channel_key AS k, v.flag AS f, COUNT(*) AS n,
-                SUM(CASE WHEN v.value > 0 THEN (CASE WHEN u.created_at > ? THEN ? ELSE 1.0 END) ELSE 0 END) AS up,
-                SUM(CASE WHEN v.value < 0 THEN (CASE WHEN u.created_at > ? THEN ? ELSE 1.0 END) ELSE 0 END) AS down
-         FROM votes v JOIN users u ON u.id = v.user_id
-         WHERE v.channel_key IN (${ph}) GROUP BY v.channel_key, v.flag`
-      ).bind(now - NEW_USER_MS, NEW_USER_WEIGHT, now - NEW_USER_MS, NEW_USER_WEIGHT, ...part),
-      env.DB.prepare(`SELECT key, ai, pe FROM overrides WHERE key IN (${ph})`).bind(...part),
-      env.DB.prepare(`SELECT key, name FROM channels WHERE key IN (${ph})`).bind(...part),
+        `WITH ranked AS (
+           SELECT v.channel_key AS k, v.flag AS f, v.value AS val,
+                  CASE WHEN u.created_at > ?1 THEN 0.0 ELSE 1.0 END AS w,
+                  ROW_NUMBER() OVER (PARTITION BY v.channel_key, v.flag, COALESCE(u.reg_net, u.id) ORDER BY u.created_at) AS rn
+           FROM votes v JOIN users u ON u.id = v.user_id
+           WHERE v.channel_key IN (${ph}))
+         SELECT k, f, COUNT(*) AS n,
+                SUM(CASE WHEN val > 0 AND rn <= ?2 THEN w ELSE 0 END) AS up,
+                SUM(CASE WHEN val < 0 AND rn <= ?2 THEN w ELSE 0 END) AS down
+         FROM ranked GROUP BY k, f`
+      ).bind(now - c.warmupMs, c.maxPerNet, ...keys),
+      env.DB.prepare(`SELECT key, ai, pe FROM overrides WHERE key IN (${keys.map(() => '?').join(',')})`).bind(...keys),
+      env.DB.prepare(`SELECT key, name FROM channels WHERE key IN (${keys.map(() => '?').join(',')})`).bind(...keys),
     ]);
-
     const t = {};
     for (const r of tallies.results) (t[r.k] ||= {})[r.f] = r;
     const ov = Object.fromEntries(overrides.results.map(r => [r.key, r]));
     const nm = Object.fromEntries(names.results.map(r => [r.key, r.name]));
 
-    const stmts = [];
-    for (const key of part) {
-      const res = {};
-      let total = 0;
-      for (const f of ['ai', 'pe']) {
-        const r = t[key]?.[f];
-        const up = r?.up || 0, down = r?.down || 0, n = r?.n || 0;
-        total += n;
-        const pct = up + down > 0 ? Math.round((100 * up) / (up + down)) : 0;
-        let shown = up + down >= c.minVotes && pct >= c.minAgree;
-        const o = ov[key]?.[f];
-        if (o === 1) shown = true;
-        if (o === 0) shown = false;
-        res[f] = { pct: shown ? Math.max(pct, 1) : 0, n, rawPct: pct };
-      }
-
-      if (res.ai.pct || res.pe.pct) {
-        snap.c[key] = [res.ai.pct, res.ai.n, res.pe.pct, res.pe.n, nm[key] || ''];
-      } else {
-        delete snap.c[key];
-      }
-
-      if (total === 0 && !ov[key]) {
-        stmts.push(env.DB.prepare('DELETE FROM channels WHERE key = ?').bind(key));
-      } else {
-        stmts.push(env.DB.prepare(
-          'UPDATE channels SET ai_pct = ?, ai_n = ?, pe_pct = ?, pe_n = ?, dirty = 0, updated_at = ? WHERE key = ?'
-        ).bind(res.ai.rawPct, res.ai.n, res.pe.rawPct, res.pe.n, now, key));
-      }
+    for (const { key, rev } of part) {
+      const s = score(t[key], ov[key], nm[key], c);
+      if (s.entry) snap.c[key] = s.entry; else delete snap.c[key];
+      updates.push({ key, rev, raw: s.raw, remove: s.total === 0 && !ov[key] });
     }
-    if (stmts.length) await env.DB.batch(stmts);
   }
 
-  snap.generated = now;
-  snap.min = { votes: c.minVotes, agree: c.minAgree };
-  await env.BUCKET.put(SNAPSHOT, JSON.stringify(snap), {
-    httpMetadata: { contentType: 'application/json', cacheControl: 'public, max-age=600' },
-  });
-  return { changed: keys.length, total: Object.keys(snap.c).length };
+  if (JSON.stringify(snap.c) !== before || !obj) {
+    snap.generated = now;
+    snap.min = { votes: c.minVotes, agree: c.minAgree };
+    const put = await env.BUCKET.put(SNAPSHOT, JSON.stringify(snap), {
+      httpMetadata: { contentType: 'application/json' },
+      ...(obj ? { onlyIf: { etagMatches: obj.etag } } : {}),
+    });
+    if (!put) return { changed: 0, conflict: true }; // another rebuild won; dirty flags stay set
+    await globalThis.caches?.default.delete(new Request(CACHE_KEY));
+  }
+
+  for (const part of chunks(updates, 90)) {
+    await env.DB.batch(part.map(u => (u.remove
+      ? env.DB.prepare('DELETE FROM channels WHERE key = ? AND rev = ?').bind(u.key, u.rev)
+      : env.DB.prepare(
+        'UPDATE channels SET ai_pct = ?, ai_n = ?, pe_pct = ?, pe_n = ?, dirty = 0, updated_at = ? WHERE key = ? AND rev = ?'
+      ).bind(u.raw.ai.pct, u.raw.ai.n, u.raw.pe.pct, u.raw.pe.n, now, u.key, u.rev))));
+  }
+  return { changed: dirty.length, total: Object.keys(snap.c).length };
 }
 
-// ---------- entry points ----------
+// ---------------------------------------------------------------------------
+// Entry points
+// ---------------------------------------------------------------------------
+
+const POST_ROUTES = { '/register': register, '/votes': votes, '/forget': forget };
+
 export default {
-  async fetch(req, env) {
+  /** @param {Request} req @param {Object} env @param {ExecutionContext} ctx */
+  async fetch(req, env, ctx) {
     const { pathname } = new URL(req.url);
-    if (req.method === 'OPTIONS') return new Response(null, { headers: CORS });
     try {
-      if (req.method === 'GET' && pathname === '/snapshot.json') return await snapshot(req, env);
+      if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS_GET });
+      if (req.method === 'GET' && pathname === '/snapshot.json') return await snapshot(req, env, ctx);
       if (req.method === 'GET' && pathname === '/config') {
         const c = cfg(env);
-        return json({ powBits: c.powBits, minVotes: c.minVotes, minAgree: c.minAgree, maxBatch: MAX_BATCH });
+        return json({ powBits: c.powBits, minVotes: c.minVotes, minAgree: c.minAgree, maxBatch: A.LIMITS.MAX_BATCH }, 200, CORS_GET);
       }
-      if (req.method === 'POST' && pathname === '/register') return await register(req, env);
-      if (req.method === 'POST' && pathname === '/votes') return await votes(req, env);
-      if (req.method === 'POST' && pathname === '/admin/rebuild') {
-        if (!env.ADMIN_TOKEN || req.headers.get('authorization') !== `Bearer ${env.ADMIN_TOKEN}`)
-          return json({ error: 'forbidden' }, 403);
-        return json(await rebuild(env, true));
+      if (req.method !== 'POST') return json({ error: 'not found' }, 404);
+      if (!originAllowed(req)) return json({ error: 'forbidden origin' }, 403);
+
+      if (pathname === '/admin/rebuild') {
+        const auth = req.headers.get('authorization') || '';
+        if (!env.ADMIN_TOKEN || !(await safeEqual(auth, `Bearer ${env.ADMIN_TOKEN}`))) return json({ error: 'forbidden' }, 403);
+        await env.DB.prepare('UPDATE channels SET dirty = 1, rev = rev + 1').run();
+        return json(await rebuild(env));
       }
-      return json({ error: 'not found' }, 404);
+      const handler = POST_ROUTES[pathname];
+      if (!handler) return json({ error: 'not found' }, 404);
+      const parsed = await readJson(req);
+      if (!parsed.ok) return json({ error: parsed.error }, parsed.status);
+      return await handler(req, env, parsed.body);
     } catch (e) {
       console.error(e);
       return json({ error: 'server error' }, 500);
     }
   },
 
+  /** Cron trigger: recount changed channels. */
   async scheduled(_event, env, ctx) {
-    ctx.waitUntil(rebuild(env, false));
+    ctx.waitUntil(rebuild(env));
   },
 };

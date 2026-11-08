@@ -1,68 +1,96 @@
-// The Eyes of Argus — content script (runs on youtube.com)
+/**
+ * @file Content script of The Eyes of Argus (runs on youtube.com, top frame only).
+ *
+ * Two jobs:
+ * 1. **Show marks.** Every channel link on the page gets a `data-argus="ai pe"`
+ *    attribute and its video card a `data-argus-card` attribute; `content.css` turns
+ *    those into badges, tinted names and faded cards. Setting attributes is the only DOM
+ *    work, so the cost on YouTube stays tiny.
+ * 2. **Resolve right-clicks.** When a menu item is chosen, work out which channel was
+ *    right-clicked and ask the background to change it (the background is the only
+ *    part that writes marks; see background.js).
+ *
+ * Where a channel's state comes from, highest priority first:
+ * your own mark (yes / "not") → the subscribed shared list → the community list.
+ */
 (() => {
-  const api = globalThis.browser ?? chrome;
+  'use strict';
 
-  // Elements YouTube uses for a single video/channel "card"
+  const api = globalThis.browser ?? globalThis.chrome;
+  const A = globalThis.Argus;
+  const { FLAGS, MSG } = A;
+
+  /** Elements YouTube uses for a single video/channel card. */
   const CARD_SEL = [
     'ytd-rich-item-renderer', 'ytd-video-renderer', 'ytd-grid-video-renderer',
     'ytd-compact-video-renderer', 'ytd-playlist-video-renderer', 'ytd-channel-renderer',
     'ytd-playlist-panel-video-renderer', 'ytd-reel-item-renderer', 'yt-lockup-view-model',
-    'ytm-shorts-lockup-view-model'
+    'ytm-shorts-lockup-view-model',
   ].join(',');
+  /** The owner box under a video on the watch page. */
   const OWNER_SEL = 'ytd-video-owner-renderer, ytd-watch-metadata';
+  /** Any link that can point at a channel. */
   const LINK_SEL = 'a[href*="/@"], a[href*="/channel/UC"]';
-  const FLAGS = ['ai', 'pe'];
+  /** Mutations inside the video player never add channel links; ignore them. */
+  const PLAYER_SEL = '#movie_player, ytd-player';
+  /** A right-click older than this is not trusted for a menu action. */
+  const TARGET_MAX_AGE_MS = 15000;
+  const SCAN_DELAY_MS = 200;
 
-  let local = {};      // your marks         { key: {ai: 1|-1|0, pe: 1|-1|0, name, uc, t} }
-  let shared = {};     // subscribed list    { key: {ai: bool, pe: bool, name} }
-  let community = {};  // sync snapshot      { key: [aiPct, aiVotes, pePct, peVotes, name] }
+  let local = {};      // your marks         { key: {ai, pe, name, uc, t} }
+  let shared = {};     // subscribed list    { key: {ai, pe, name} }
+  let community = {};  // community list     { key: [aiPct, aiVotes, pePct, peVotes, name?, overrideBits?] }
   let settings = { badges: true, tint: true, dim: false };
   let syncOn = false;
-  const merged = new Map();  // key -> { st: 'ai pe', title }
+  let communityAll = {};
+
+  /** @type {Map<string, {st: string, title: string|null}>} key → state shown on the page */
+  const merged = new Map();
+  /** Number of elements currently carrying our attributes (for the idle shortcut). */
+  let taggedCount = 0;
+  /** @type {{el: Element, at: number}|null} */
   let lastTarget = null;
+  /** Times used to decide whether `link[rel=canonical]` belongs to the current page. */
+  let navStartAt = 0;
+  let canonicalAt = 0;
 
-  // 1 = yes, -1 = "not" (you disagree), 0 = no opinion. Older versions stored true/false.
-  const val = x => (x === true || x === 1 ? 1 : x === -1 ? -1 : 0);
+  // ---------------------------------------------------------------------------
+  // State
+  // ---------------------------------------------------------------------------
 
-  // ---------- helpers ----------
-  function keyFromHref(href) {
-    if (!href) return null;
-    let u;
-    try { u = new URL(href, 'https://www.youtube.com'); } catch { return null; }
-    if (!/(^|\.)youtube\.com$/.test(u.hostname)) return null;
-    let m = u.pathname.match(/^\/(@[^/?#]+)/);
-    if (m) { try { return decodeURIComponent(m[1]).toLowerCase(); } catch { return m[1].toLowerCase(); } }
-    m = u.pathname.match(/^\/channel\/(UC[\w-]{22})/);
-    return m ? m[1] : null;
-  }
-
+  /** Recomputes `merged` from your marks, the shared list and the community list. */
   function rebuild() {
     merged.clear();
-    // A local mark saved with its UC… id also applies to /channel/UC… links
-    const localBy = { ...local };
-    for (const [k, v] of Object.entries(local)) if (v.uc && !localBy[v.uc]) localBy[v.uc] = v;
+    // A mark saved with its UC… id also applies to /channel/UC… links
+    const mine = { ...local };
+    for (const v of Object.values(local)) if (v.uc && !mine[v.uc]) mine[v.uc] = v;
 
-    const keys = new Set([...Object.keys(shared), ...Object.keys(community), ...Object.keys(localBy)]);
+    const keys = new Set([...Object.keys(shared), ...Object.keys(community), ...Object.keys(mine)]);
     for (const key of keys) {
-      const l = localBy[key], s = shared[key], c = community[key];
-      const on = {};
-      for (const f of FLAGS) {
-        const lv = val(l?.[f]);
-        on[f] = lv ? lv > 0 : !!(s?.[f] || (c && c[f === 'ai' ? 0 : 2] > 0));
-      }
-      const st = FLAGS.filter(f => on[f]).join(' ');
-      if (!st) continue;
-      let title = null;
-      if (c) {
-        const parts = [];
-        if (c[0]) parts.push(`AI ${c[0]}% of ${c[1]} votes`);
-        if (c[2]) parts.push(`PE-owned ${c[2]}% of ${c[3]} votes`);
-        if (parts.length) title = 'Eyes of Argus community: ' + parts.join(' · ');
-      }
-      merged.set(key, { st, title });
+      const l = mine[key], s = shared[key], c = community[key];
+      const on = FLAGS.filter((f, i) => {
+        const lv = A.val(l?.[f]);
+        return lv ? lv > 0 : !!(s?.[f] || (c && c[i * 2] > 0));
+      });
+      if (!on.length) continue;
+      merged.set(key, { st: on.join(' '), title: c ? communityTitle(c) : null });
     }
   }
 
+  /**
+   * Hover text for a community entry.
+   * @param {Array<number|string>} c `[aiPct, aiVotes, pePct, peVotes, name?, overrideBits?]`
+   * @returns {string|null}
+   */
+  function communityTitle(c) {
+    const o = Number(c[5]) || 0;
+    const parts = [];
+    if (c[0]) parts.push(o & 1 ? 'AI (set by list maintainer)' : `AI ${c[0]}% of ${c[1]} votes`);
+    if (c[2]) parts.push(o & 2 ? 'PE-owned (set by list maintainer)' : `PE-owned ${c[2]}% of ${c[3]} votes`);
+    return parts.length ? 'Eyes of Argus community: ' + parts.join(' · ') : null;
+  }
+
+  /** Applies the display settings as classes on <html> (CSS does the rest). */
   function applySettings() {
     const c = document.documentElement.classList;
     c.toggle('argus-badges', !!settings.badges);
@@ -70,70 +98,111 @@
     c.toggle('argus-dim', !!settings.dim);
   }
 
-  // ---------- scanning (cheap: only sets attributes, CSS does the rest) ----------
+  // ---------------------------------------------------------------------------
+  // Scanning
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Tags every channel link and card on the page, and untags anything that no longer
+   * qualifies (YouTube reuses elements and changes their href in place).
+   */
   function scan() {
     scheduled = false;
+    if (!merged.size && !taggedCount) return; // nothing marked and nothing to clean up
+
+    const tagged = new Set();
     const cards = new Map();
     for (const a of document.querySelectorAll(LINK_SEL)) {
-      const m = merged.get(keyFromHref(a.getAttribute('href')));
+      const m = merged.get(A.keyFromHref(a.getAttribute('href')));
       const st = m ? m.st : '';
       const isText = st && a.textContent.trim() !== '' && !a.querySelector('img, yt-img-shadow, yt-avatar-shape');
-      const want = isText ? st : '';
-      if ((a.dataset.argus || '') !== want) {
-        if (want) a.dataset.argus = want; else delete a.dataset.argus;
+      if (isText) {
+        if (a.dataset.argus !== st) a.dataset.argus = st;
+        if (m.title && a.title !== m.title) { a.title = m.title; a.dataset.argusTitle = '1'; }
+        tagged.add(a);
       }
-      const title = want && m.title;
-      if (title) {
-        if (a.title !== title) { a.title = title; a.dataset.argusTitle = '1'; }
-      } else if (a.dataset.argusTitle) {
-        a.removeAttribute('title'); delete a.dataset.argusTitle;
-      }
-      const card = a.closest(CARD_SEL);
-      if (card && (st || !cards.has(card))) cards.set(card, st);
+      const card = st && a.closest(CARD_SEL);
+      if (card) cards.set(card, st);
     }
     for (const [card, st] of cards) {
-      if ((card.dataset.argusCard || '') !== st) {
-        if (st) card.dataset.argusCard = st; else delete card.dataset.argusCard;
-      }
+      if (card.dataset.argusCard !== st) card.dataset.argusCard = st;
+      tagged.add(card);
     }
+    // Clean up everything tagged earlier that this pass didn't confirm
+    for (const el of document.querySelectorAll('[data-argus], [data-argus-card], [data-argus-title]')) {
+      if (tagged.has(el) && (el.dataset.argus || el.dataset.argusCard)) {
+        if (el.dataset.argusTitle && !merged.get(A.keyFromHref(el.getAttribute('href')))?.title) {
+          el.removeAttribute('title'); delete el.dataset.argusTitle;
+        }
+        continue;
+      }
+      delete el.dataset.argus;
+      delete el.dataset.argusCard;
+      if (el.dataset.argusTitle) { el.removeAttribute('title'); delete el.dataset.argusTitle; }
+    }
+    taggedCount = tagged.size;
   }
 
   let scheduled = false;
+  /** Schedules one scan; many mutations in a burst cause a single scan. */
   function schedule() {
     if (scheduled) return;
     scheduled = true;
-    setTimeout(scan, 150);
+    setTimeout(() => {
+      if (typeof requestIdleCallback === 'function') requestIdleCallback(scan, { timeout: 500 });
+      else scan();
+    }, SCAN_DELAY_MS);
   }
 
-  new MutationObserver(schedule).observe(document.documentElement, {
-    childList: true, subtree: true, attributes: true, attributeFilter: ['href']
+  /** @param {MutationRecord[]} records */
+  function onMutations(records) {
+    let relevant = false;
+    for (const r of records) {
+      const t = r.target;
+      if (t.nodeName === 'LINK' && t.rel === 'canonical') canonicalAt = Date.now();
+      for (const n of r.addedNodes) if (n.nodeName === 'LINK' && n.rel === 'canonical') canonicalAt = Date.now();
+      if (!relevant && !(t.closest && t.closest(PLAYER_SEL))) relevant = true;
+    }
+    if (relevant) schedule();
+  }
+
+  new MutationObserver(onMutations).observe(document.documentElement, {
+    childList: true, subtree: true, attributes: true, attributeFilter: ['href'],
   });
+  document.addEventListener('yt-navigate-start', () => { navStartAt = Date.now(); });
   document.addEventListener('yt-navigate-finish', schedule);
 
-  // ---------- figuring out which channel was right-clicked ----------
-  document.addEventListener('contextmenu', e => { lastTarget = e.target; }, true);
+  // ---------------------------------------------------------------------------
+  // Right-click → channel
+  // ---------------------------------------------------------------------------
 
+  document.addEventListener('contextmenu', e => { lastTarget = { el: e.target, at: Date.now() }; }, true);
+
+  /** @param {Element|null} a @returns {{key: string, name: string}|null} */
   function fromAnchor(a) {
-    const key = a && keyFromHref(a.getAttribute('href'));
+    const key = a && A.keyFromHref(a.getAttribute('href'));
     return key ? { key, name: a.textContent.trim() } : null;
   }
 
+  /**
+   * Works out which channel a right-clicked element belongs to.
+   * @param {Element} el
+   * @returns {{key: string, name: string, uc: string}|null} null when unsure
+   */
   function resolve(el) {
-    if (el instanceof Element) {
-      const direct = fromAnchor(el.closest('a[href]'));
-      if (direct) return finish(direct, el.closest(CARD_SEL) || el.closest(OWNER_SEL));
+    const direct = fromAnchor(el.closest('a[href]'));
+    if (direct) return finish(direct, el.closest(CARD_SEL) || el.closest(OWNER_SEL));
 
-      const box = el.closest(CARD_SEL) || el.closest(OWNER_SEL);
-      if (box) {
-        for (const a of box.querySelectorAll(LINK_SEL)) {
-          const r = fromAnchor(a);
-          if (r) return finish(r, box);
-        }
-        return null; // inside a card but no channel link — don't guess
+    const box = el.closest(CARD_SEL) || el.closest(OWNER_SEL);
+    if (box) {
+      for (const a of box.querySelectorAll(LINK_SEL)) {
+        const r = fromAnchor(a);
+        if (r) return finish(r, box);
       }
+      return null; // inside a card but no channel link: don't guess
     }
     // On a channel page: the channel itself
-    const pageKey = keyFromHref(location.pathname);
+    const pageKey = A.keyFromHref(location.pathname);
     if (pageKey) {
       const h = document.querySelector('yt-page-header-view-model h1, #page-header h1, #channel-name #text');
       return finish({ key: pageKey, name: h?.textContent.trim() || '' }, null);
@@ -146,70 +215,75 @@
     return null;
   }
 
+  /**
+   * Fills in the display name and, on the channel's own page, its permanent `UC…` id.
+   * The canonical link is only trusted if it was set after the last in-page navigation
+   * started (or on a fresh page load), so channel B never inherits channel A's id.
+   * @param {{key: string, name: string, uc: string}} r
+   * @param {Element|null} box card or owner box to look for a name in
+   */
   function finish(r, box) {
     if (!r.name && box) {
       for (const a of box.querySelectorAll(LINK_SEL)) {
-        if (keyFromHref(a.getAttribute('href')) === r.key && a.textContent.trim()) { r.name = a.textContent.trim(); break; }
+        if (A.keyFromHref(a.getAttribute('href')) === r.key && a.textContent.trim()) { r.name = a.textContent.trim(); break; }
       }
     }
     r.name = r.name || r.key;
-    // On the channel's own page YouTube exposes its permanent UC… id; remember it
-    if (r.key.startsWith('@') && keyFromHref(location.pathname) === r.key) {
+    if (r.key.startsWith('@') && A.keyFromHref(location.pathname) === r.key && canonicalAt >= navStartAt) {
       const m = document.querySelector('link[rel="canonical"]')?.href.match(/\/channel\/(UC[\w-]{22})/);
       if (m) r.uc = m[1];
     }
     return r;
   }
 
-  // ---------- applying a mark ----------
+  /** Menu action → flag changes and the confirmation text. */
   const ACTIONS = {
-    ai:    { set: { ai: 1 },        msg: 'marked as AI' },
-    pe:    { set: { pe: 1 },        msg: 'marked as private-equity owned' },
-    notai: { set: { ai: -1 },       msg: 'marked as not AI' },
-    notpe: { set: { pe: -1 },       msg: 'marked as not PE-owned' },
-    clear: { set: { ai: 0, pe: 0 }, msg: 'cleared' },
+    ai:    { changes: { ai: 1 },        msg: 'marked as AI' },
+    pe:    { changes: { pe: 1 },        msg: 'marked as private-equity owned' },
+    notai: { changes: { ai: -1 },       msg: 'marked as not AI' },
+    notpe: { changes: { pe: -1 },       msg: 'marked as not PE-owned' },
+    clear: { changes: { ai: 0, pe: 0 }, msg: 'cleared' },
   };
 
-  async function apply(t, action) {
+  /**
+   * Handles a menu click forwarded by the background.
+   * @param {string} action one of the ACTIONS keys
+   */
+  async function onMenu(action) {
     const a = ACTIONS[action];
     if (!a) return;
-    const { marks = {}, queue = {} } = await api.storage.local.get(['marks', 'queue']);
-    const old = marks[t.key] || {};
-    const e = { ai: val(old.ai), pe: val(old.pe), name: t.name, uc: t.uc || old.uc, t: Date.now() };
-    const changed = [];
-    for (const [f, v] of Object.entries(a.set)) {
-      if (e[f] !== v) changed.push(f);
-      e[f] = v;
+    const target = lastTarget && Date.now() - lastTarget.at < TARGET_MAX_AGE_MS ? lastTarget.el : null;
+    lastTarget = null; // one right-click, one action
+    const t = target && resolve(target);
+    if (!t) { toast('No channel found here. Right-click the channel name or a video', true); return; }
+    try {
+      const res = await api.runtime.sendMessage({ type: MSG.MARK, key: t.key, name: t.name, uc: t.uc, changes: a.changes });
+      if (res?.ok) toast(`${t.name} ${a.msg}`);
+      else toast(`Couldn't save: ${res?.error || 'unknown error'}`, true);
+    } catch {
+      toast('Couldn\'t save: the extension was updated. Reload this page', true);
     }
-    if (!e.uc) delete e.uc;
-    if (e.ai || e.pe) marks[t.key] = e; else delete marks[t.key];
-
-    const save = { marks };
-    if (syncOn && changed.length) {
-      for (const f of changed) {
-        for (const k of [t.key, e.uc].filter(Boolean)) {
-          queue[`${k}|${f}`] = { k, f, v: e[f], name: t.name, t: e.t };
-        }
-      }
-      save.queue = queue;
-    }
-    await api.storage.local.set(save);
-    toast(`${t.name} ${a.msg}`);
   }
 
   api.runtime.onMessage.addListener(msg => {
-    if (msg?.type !== 'argus-menu') return;
-    const t = resolve(lastTarget);
-    if (!t) { toast('No channel found here. Right-click the channel name or a video', true); return; }
-    apply(t, msg.action);
+    if (msg?.type === MSG.MENU) onMenu(msg.action);
   });
 
-  // ---------- toast ----------
+  // ---------------------------------------------------------------------------
+  // Toast
+  // ---------------------------------------------------------------------------
+
   let toastEl, toastTimer;
+  /**
+   * Shows a short confirmation at the bottom of the page.
+   * @param {string} text
+   * @param {boolean} [warn] amber border for problems
+   */
   function toast(text, warn) {
     if (!toastEl) {
       toastEl = document.createElement('div');
       toastEl.id = 'argus-toast';
+      toastEl.setAttribute('role', 'status');
       document.documentElement.appendChild(toastEl);
     }
     toastEl.textContent = '👁 ' + text;
@@ -219,26 +293,32 @@
     toastTimer = setTimeout(() => toastEl.classList.remove('show'), 2200);
   }
 
-  // ---------- load + live updates ----------
+  // ---------------------------------------------------------------------------
+  // Load and live updates
+  // ---------------------------------------------------------------------------
+
+  /** Shows the community list only while sync is on. */
+  const refreshCommunity = () => { community = syncOn ? communityAll : {}; };
+
   api.storage.local.get(['marks', 'sharedList', 'settings', 'sync', 'community']).then(d => {
     local = d.marks || {};
     shared = d.sharedList?.channels || {};
     settings = { ...settings, ...(d.settings || {}) };
     syncOn = !!d.sync?.enabled;
-    community = (syncOn && d.community?.c) || {};
+    communityAll = d.community?.c || {};
+    refreshCommunity();
     rebuild(); applySettings(); schedule();
   });
 
-  api.storage.onChanged.addListener(async (ch, area) => {
+  api.storage.onChanged.addListener((ch, area) => {
     if (area !== 'local') return;
+    if (ch.settings) { settings = { ...settings, ...(ch.settings.newValue || {}) }; applySettings(); }
+    if (!(ch.marks || ch.sharedList || ch.sync || ch.community)) return;
     if (ch.marks) local = ch.marks.newValue || {};
     if (ch.sharedList) shared = ch.sharedList.newValue?.channels || {};
-    if (ch.settings) { settings = { ...settings, ...(ch.settings.newValue || {}) }; applySettings(); }
-    if (ch.sync || ch.community) {
-      const d = await api.storage.local.get(['sync', 'community']);
-      syncOn = !!d.sync?.enabled;
-      community = (syncOn && d.community?.c) || {};
-    }
-    if (ch.marks || ch.sharedList || ch.sync || ch.community) { rebuild(); schedule(); }
+    if (ch.sync) syncOn = !!ch.sync.newValue?.enabled;
+    if (ch.community) communityAll = ch.community.newValue?.c || {};
+    refreshCommunity();
+    rebuild(); schedule();
   });
 })();
