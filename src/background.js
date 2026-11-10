@@ -42,7 +42,8 @@ const api = globalThis.browser ?? globalThis.chrome;
 const A = globalThis.Argus;
 const { FLAGS, MSG, LIMITS } = A;
 
-const YT = ['*://*.youtube.com/*'];
+/** Sites the menu appears on: the same list the content script runs on (see build.py). */
+const SITES = api.runtime.getManifest?.().content_scripts?.[0]?.matches || ['*://*.youtube.com/*'];
 const SYNC_ALARM = 'argus-sync';        // periodic: download the community list, retry votes
 const FLUSH_ALARM = 'argus-flush';      // one-shot backup for sending fresh votes
 const SHARED_ALARM = 'argus-shared';    // periodic: refresh the subscribed shared list
@@ -589,8 +590,8 @@ async function buildMenus() {
   if (!api.contextMenus) return;
   await api.contextMenus.removeAll();
   const add = o => api.contextMenus.create({ contexts: MENU_CONTEXTS, ...o });
-  add({ id: 'argus', title: 'The Eyes of Argus', documentUrlPatterns: YT });
-  add({ id: 'ai', parentId: 'argus', title: 'Mark as AI channel' });
+  add({ id: 'argus', title: 'The Eyes of Argus', documentUrlPatterns: SITES });
+  add({ id: 'ai', parentId: 'argus', title: 'Mark as AI' });
   add({ id: 'pe', parentId: 'argus', title: 'Mark as private-equity owned' });
   add({ id: 'sep1', parentId: 'argus', type: 'separator' });
   add({ id: 'notai', parentId: 'argus', title: 'Not AI (disagree)' });

@@ -83,8 +83,6 @@
   // Your marks
   // ---------------------------------------------------------------------------
 
-  /** @param {string} key @returns {string} the channel's YouTube address */
-  const channelUrl = key => (key.startsWith('@') ? `https://www.youtube.com/${key}` : `https://www.youtube.com/channel/${key}`);
 
   /** Renders the marks table (built with DOM methods only, never innerHTML). */
   function render() {
@@ -106,10 +104,10 @@
 
       const td = document.createElement('td');
       const a = document.createElement('a');
-      a.href = channelUrl(key); a.target = '_blank'; a.rel = 'noreferrer';
+      a.href = A.urlForKey(key); a.target = '_blank'; a.rel = 'noreferrer';
       a.textContent = name;
       const k = document.createElement('span');
-      k.className = 'k'; k.textContent = key;
+      k.className = 'k'; k.textContent = `${A.labelForKey(key)} · ${key}`;
       td.append(a, k);
       tr.append(td);
 

@@ -63,20 +63,44 @@
   const UC_RE = /^UC[\w-]{22}$/;
 
   /**
-   * Turns page, user or network input into a canonical channel key, or null if invalid.
+   * Keys outside YouTube carry a platform prefix: `x:handle`, `reddit:u/name`,
+   * `reddit:r/sub`, `instagram:handle`, `tiktok:handle`, `twitch:name`, `facebook:name`
+   * and `site:example.com` (a website, as marked from a search result). The part after
+   * the prefix is always lowercase. YouTube keys keep their original unprefixed form
+   * (`@handle`, `UC…`) so marks made by earlier versions stay valid.
+   * @type {Object<string, {re: RegExp, label: string, url: function(string): string}>}
+   */
+  const PLATFORMS = Object.freeze({
+    x:         { re: /^[a-z0-9_]{1,15}$/, label: 'X', url: id => `https://x.com/${id}` },
+    reddit:    { re: /^(u\/[a-z0-9_-]{3,20}|r\/[a-z0-9_]{2,21})$/, label: 'Reddit', url: id => `https://www.reddit.com/${id.startsWith('u/') ? 'user/' + id.slice(2) : id}` },
+    instagram: { re: /^[a-z0-9._]{1,30}$/, label: 'Instagram', url: id => `https://www.instagram.com/${id}/` },
+    tiktok:    { re: /^[a-z0-9._]{2,24}$/, label: 'TikTok', url: id => `https://www.tiktok.com/@${id}` },
+    twitch:    { re: /^[a-z0-9_]{3,25}$/, label: 'Twitch', url: id => `https://www.twitch.tv/${id}` },
+    facebook:  { re: /^[a-z0-9.]{1,60}$/, label: 'Facebook', url: id => (/^\d+$/.test(id) ? `https://www.facebook.com/profile.php?id=${id}` : `https://www.facebook.com/${id}`) },
+    site:      { re: /^(?=.{4,100}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{1,62}$/, label: 'Website', url: id => `https://${id}/` },
+  });
+
+  /**
+   * Turns page, user or network input into a canonical key, or null if invalid.
    *
-   * Handles are percent-decoded, Unicode-normalized (NFC) and lowercased, so
+   * YouTube handles are percent-decoded, Unicode-normalized (NFC) and lowercased, so
    * `/@%C3%89cole`, `@École` and `@école` are all `@école`. `UC…` ids are
-   * case-sensitive and returned unchanged.
+   * case-sensitive and returned unchanged. Prefixed keys (see {@link PLATFORMS}) are
+   * lowercased and checked against their platform's pattern.
    *
    * @param {unknown} k
-   * @returns {string|null} e.g. `"@nileblue"` or `"UCxxxxxxxxxxxxxxxxxxxxxx"`
+   * @returns {string|null} e.g. `"@nileblue"`, `"UCxxxxxxxxxxxxxxxxxxxxxx"`, `"x:nasa"`, `"site:example.com"`
    */
   function normalizeKey(k) {
     if (typeof k !== 'string') return null;
     let t = k.trim();
     if (UC_RE.test(t)) return t;
-    if (!t.startsWith('@')) return null;
+    if (!t.startsWith('@')) {
+      const i = t.indexOf(':');
+      if (i < 1 || t.length > 120) return null;
+      const prefix = t.slice(0, i).toLowerCase(), id = t.slice(i + 1).toLowerCase();
+      return Object.hasOwn(PLATFORMS, prefix) && PLATFORMS[prefix].re.test(id) ? `${prefix}:${id}` : null;
+    }
     if (t.includes('%')) {
       try { t = decodeURIComponent(t); } catch { return null; }
     }
@@ -90,6 +114,49 @@
    */
   function isChannelId(k) {
     return typeof k === 'string' && UC_RE.test(k);
+  }
+
+  /**
+   * The platform a canonical key belongs to.
+   * @param {string} key
+   * @returns {string} `"youtube"` or a {@link PLATFORMS} prefix
+   */
+  function platformOf(key) {
+    const i = key.indexOf(':');
+    return i > 0 ? key.slice(0, i) : 'youtube';
+  }
+
+  /**
+   * Human-readable platform name for a key, e.g. `"YouTube"`, `"Website"`.
+   * @param {string} key
+   * @returns {string}
+   */
+  function labelForKey(key) {
+    return PLATFORMS[platformOf(key)]?.label || 'YouTube';
+  }
+
+  /**
+   * The public address of the thing a key stands for.
+   * @param {string} key canonical key
+   * @returns {string}
+   */
+  function urlForKey(key) {
+    const p = PLATFORMS[platformOf(key)];
+    if (p) return p.url(key.slice(key.indexOf(':') + 1));
+    return key.startsWith('@') ? `https://www.youtube.com/${key}` : `https://www.youtube.com/channel/${key}`;
+  }
+
+  /**
+   * The `site:` key for a web address (as used for search results): the hostname
+   * without a leading `www.`. Only http(s) addresses qualify.
+   * @param {string} url absolute URL
+   * @returns {string|null} e.g. `"site:example.com"`
+   */
+  function siteKey(url) {
+    let u;
+    try { u = new URL(url); } catch { return null; }
+    if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;
+    return normalizeKey('site:' + u.hostname.replace(/^www\./, '').replace(/\.$/, ''));
   }
 
   /**
@@ -207,7 +274,7 @@
 
   root.Argus = Object.freeze({
     FLAGS, MSG, LIMITS,
-    normalizeKey, isChannelId, keyFromHref, val, cleanName, serverBase, queueKey,
+    normalizeKey, isChannelId, keyFromHref, platformOf, labelForKey, urlForKey, siteKey, val, cleanName, serverBase, queueKey,
     isCommunityEntry, toHex, sha256hex, zeroBits,
   });
 })(globalThis);

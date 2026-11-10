@@ -67,7 +67,7 @@ test('a card without a channel link is not guessed', async () => {
   const { menu, window } = youtubePage(GRID, s);
   await menu('t3', 'ai');
   assert.equal(s.data.marks, undefined);
-  assert.match(window.document.getElementById('argus-toast').textContent, /No channel found/);
+  assert.match(window.document.getElementById('argus-toast').textContent, /Nothing to mark here/);
 });
 
 test('reused anchors (YouTube changes href in place) are re-evaluated', async () => {

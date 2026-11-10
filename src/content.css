@@ -1,6 +1,6 @@
 /* The Eyes of Argus — styles injected into YouTube */
 
-html.argus-badges a[data-argus]::after {
+html.argus-badges [data-argus]::after {
   display: inline-block;
   margin-left: 6px;
   padding: 0 5px;
@@ -11,13 +11,13 @@ html.argus-badges a[data-argus]::after {
   color: #fff !important;
   text-decoration: none !important;
 }
-html.argus-badges a[data-argus="ai"]::after    { content: "AI";      background: #7c3aed; }
-html.argus-badges a[data-argus="pe"]::after    { content: "PE";      background: #d97706; }
-html.argus-badges a[data-argus="ai pe"]::after { content: "AI · PE"; background: linear-gradient(90deg, #7c3aed, #d97706); }
+html.argus-badges [data-argus="ai"]::after    { content: "AI";      background: #7c3aed; }
+html.argus-badges [data-argus="pe"]::after    { content: "PE";      background: #d97706; }
+html.argus-badges [data-argus="ai pe"]::after { content: "AI · PE"; background: linear-gradient(90deg, #7c3aed, #d97706); }
 
-html.argus-tint a[data-argus="ai"],    html.argus-tint a[data-argus="ai"] *    { color: #a78bfa !important; }
-html.argus-tint a[data-argus="pe"],    html.argus-tint a[data-argus="pe"] *    { color: #fbbf24 !important; }
-html.argus-tint a[data-argus="ai pe"], html.argus-tint a[data-argus="ai pe"] * { color: #fb923c !important; }
+html.argus-tint [data-argus="ai"],    html.argus-tint [data-argus="ai"] *    { color: #8b5cf6 !important; }
+html.argus-tint [data-argus="pe"],    html.argus-tint [data-argus="pe"] *    { color: #d97706 !important; }
+html.argus-tint [data-argus="ai pe"], html.argus-tint [data-argus="ai pe"] * { color: #ea580c !important; }
 
 html.argus-dim [data-argus-card] {
   opacity: .35;

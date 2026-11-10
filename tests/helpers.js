@@ -11,7 +11,7 @@ const SRC = path.join(ROOT, 'src');
 
 /** Scripts in the order the manifest loads them (kept in sync with build.py). */
 const present = list => list.filter(f => fs.existsSync(path.join(SRC, f)));
-const CONTENT_SCRIPTS = present(['shared.js', 'content.js']);
+const CONTENT_SCRIPTS = present(['shared.js', 'platforms.js', 'content.js']);
 const BACKGROUND_SCRIPTS = present(['shared.js', 'background.js']);
 
 const clone = x => (x === undefined ? undefined : JSON.parse(JSON.stringify(x)));
