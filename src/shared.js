@@ -73,10 +73,10 @@
   const PLATFORMS = Object.freeze({
     x:         { re: /^[a-z0-9_]{1,15}$/, label: 'X', url: id => `https://x.com/${id}` },
     reddit:    { re: /^(u\/[a-z0-9_-]{3,20}|r\/[a-z0-9_]{2,21})$/, label: 'Reddit', url: id => `https://www.reddit.com/${id.startsWith('u/') ? 'user/' + id.slice(2) : id}` },
-    instagram: { re: /^[a-z0-9._]{1,30}$/, label: 'Instagram', url: id => `https://www.instagram.com/${id}/` },
-    tiktok:    { re: /^[a-z0-9._]{2,24}$/, label: 'TikTok', url: id => `https://www.tiktok.com/@${id}` },
+    instagram: { re: /^(?=.{1,30}$)[a-z0-9_](?:[a-z0-9._]*[a-z0-9_])?$/, label: 'Instagram', url: id => `https://www.instagram.com/${id}/` },
+    tiktok:    { re: /^(?=.{2,24}$)[a-z0-9_](?:[a-z0-9._]*[a-z0-9_])?$/, label: 'TikTok', url: id => `https://www.tiktok.com/@${id}` },
     twitch:    { re: /^[a-z0-9_]{3,25}$/, label: 'Twitch', url: id => `https://www.twitch.tv/${id}` },
-    facebook:  { re: /^[a-z0-9.]{1,60}$/, label: 'Facebook', url: id => (/^\d+$/.test(id) ? `https://www.facebook.com/profile.php?id=${id}` : `https://www.facebook.com/${id}`) },
+    facebook:  { re: /^(?=.{1,60}$)[a-z0-9](?:[a-z0-9.]*[a-z0-9])?$/, label: 'Facebook', url: id => (/^\d+$/.test(id) ? `https://www.facebook.com/profile.php?id=${id}` : `https://www.facebook.com/${id}`) },
     site:      { re: /^(?=.{4,100}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{1,62}$/, label: 'Website', url: id => `https://${id}/` },
   });
 

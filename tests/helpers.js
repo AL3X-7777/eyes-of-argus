@@ -58,6 +58,7 @@ function fakeApi(storage) {
   return {
     storage,
     runtime: {
+      id: 'argus-test-extension',
       onMessage: event(), onInstalled: event(), onStartup: event(),
       getURL: p => 'ext://' + p, openOptionsPage() {}, sendMessage: async () => ({}),
     },
@@ -75,7 +76,7 @@ function youtubePage(html, storage, url = 'https://www.youtube.com/') {
   const api = fakeApi(storage);
   // Content scripts ask the background (the single writer) to change marks
   const bg = loadBackground(storage);
-  api.runtime.sendMessage = msg => bg.ask(msg);
+  api.runtime.sendMessage = msg => bg.ask(msg, { id: bg.api.runtime.id, tab: { id: 1 }, url });
   dom.window.chrome = api;
   for (const f of CONTENT_SCRIPTS) dom.window.eval(fs.readFileSync(path.join(SRC, f), 'utf8'));
   const $ = id => dom.window.document.getElementById(id);
@@ -98,9 +99,9 @@ function loadBackground(storage) {
   ctx.globalThis = ctx;
   for (const f of BACKGROUND_SCRIPTS) vm.runInContext(fs.readFileSync(path.join(SRC, f), 'utf8'), ctx, { filename: f });
   /** Sends a runtime message and resolves with the background's response. */
-  const ask = msg => new Promise(resolve => {
+  const ask = (msg, sender) => new Promise(resolve => {
     for (const f of api.runtime.onMessage.fns) {
-      const r = f(msg, {}, resolve);
+      const r = f(msg, sender || { id: api.runtime.id, tab: { id: 99 }, url: api.runtime.getURL('options.html') }, resolve);
       if (r && typeof r.then === 'function') r.then(resolve);
     }
   });

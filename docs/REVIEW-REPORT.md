@@ -99,3 +99,41 @@ A second, independent review agent checked v0.3.0. It confirmed the earlier fixe
 - rescanning only the changed parts of the page.
 
 The reviewer estimated about +10 points for these fixes, which would put the code in the mid-80s. That figure hasn't been checked by a third review.
+
+---
+
+# Third round: v0.3.1 → v0.4.0 (independent functional and security test)
+
+v0.4.0 adds X, Reddit, Instagram, TikTok, Twitch, Facebook and search results (Google, Bing,
+DuckDuckGo). An independent agent then tested it: it wrote 32 new tests, probed a local sync server,
+and loaded the Chrome build into a real Chrome. It worked on a copy and changed nothing in the project.
+
+| # | Severity | Problem | Fix |
+|---|---|---|---|
+| Q1 | Critical | In a real browser the settings page could not import, delete all marks or control sync: the check added for N9 also blocked the settings page, because it too runs in a tab. The simulated tests had missed it | Pages are told apart by address; tests now send realistic senders; a real-browser smoke test is part of the repo |
+| Q2 | High | Importing a file someone else exported overwrote your marks and sent their opinions as your votes | Two buttons: "Import list" (never your votes) and "Restore backup" |
+| Q3 | Medium | Right-click on help/developer subdomains (help.x.com/en) marked a fake account (`x:en`) | Adapters and the manifest list exact hosts only |
+| Q4 | Medium | A search result for a YouTube channel or X profile marked the whole platform | Such results are keyed by the account; the platform itself can't be marked |
+| Q5 | Low | A look-alike domain could pose as a Google redirect | Redirects only unwrapped on the search engine's own host |
+| Q6, Q7 | Low | `.`/`..` accepted as account names; a UC id accepted on non-YouTube keys | Stricter patterns; UC ids only on YouTube handles |
+| Q8 | Low | Right-click inside web components (shadow DOM) found nothing | Right-clicks now resolve through shadow roots. Badges inside shadow roots are still not drawn |
+| Q9, Q10 | Low | A page's own tooltip was lost; message types like `constructor` got an answer | Tooltip restored; own-property lookup |
+| Q11 | Low | The first voter fixed a channel's public name | Names are no longer published |
+| Q12 | Low | Channels with warm-up votes clogged the recount queue | A `recheck_at` time replaces staying in the queue |
+| Q13 | Low | Body size limit counted characters, not bytes | Counts bytes |
+| Q14 | Store | Chrome build asked for host permissions it didn't need | Removed for Chrome (kept for Firefox, which needs them to run content scripts) |
+
+**Probed and found sound:** no HTML injection anywhere (names, keys, community data, import files);
+prototype-pollution keys rejected; hostile links (`javascript:`, userinfo tricks, IPs, ports)
+handled; marks don't leak between platforms; other extensions and web pages can't send messages;
+the server's origin, content-type, SQL, admin, rate-limit, forget and replace handling all held.
+
+**Results:** 68 tests pass (was 30). The real-Chrome smoke test passes 13 of 13 checks: service
+worker, settings page including Import and Delete all, badges on YouTube, Google, X and Reddit
+pages, the right-click path, and no access for page scripts.
+
+**Not verified:**
+- Live sites. Tests use locally served pages with the sites' known markup; the selectors for X,
+  Instagram, TikTok, Twitch, Facebook and the search engines have not been checked against the live sites.
+- Firefox in a real browser (only Mozilla's linter and the simulated tests).
+- A vote-stuffing attacker with many networks over several days (see the threat model).

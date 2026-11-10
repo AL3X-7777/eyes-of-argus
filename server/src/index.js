@@ -93,8 +93,8 @@ const dirtyUserChannels = (env, id) => env.DB.prepare(
 /** `POST /register` */
 async function register(req, env, body) {
   const c = cfg(env);
-  const secret = body?.secret, nonce = String(body?.nonce ?? '');
-  if (typeof secret !== 'string' || !/^[0-9a-f]{64}$/.test(secret) || nonce.length > 32) {
+  const secret = body?.secret, nonce = body?.nonce;
+  if (typeof secret !== 'string' || !/^[0-9a-f]{64}$/.test(secret) || typeof nonce !== 'string' || !/^\d{1,16}$/.test(nonce)) {
     return json({ error: 'bad request' }, 400);
   }
   const id = (await A.sha256hex(secret)).slice(0, 32);
@@ -208,7 +208,9 @@ async function rebuild(env) {
   const c = cfg(env);
   const now = Date.now();
   await env.DB.prepare('DELETE FROM limits WHERE day < ?').bind(today()).run();
-  const { results: dirty } = await env.DB.prepare('SELECT key, rev FROM channels WHERE dirty = 1 ORDER BY updated_at LIMIT ?').bind(c.maxPerRun).all();
+  const { results: dirty } = await env.DB.prepare(
+    'SELECT key, rev FROM channels WHERE dirty = 1 OR (recheck_at > 0 AND recheck_at <= ?) ORDER BY dirty DESC, updated_at LIMIT ?'
+  ).bind(now, c.maxPerRun).all();
   if (!dirty.length) return { changed: 0 };
 
   const obj = await env.BUCKET.get(SNAPSHOT);
@@ -223,12 +225,12 @@ async function rebuild(env) {
     const [tallies, overrides, names] = await env.DB.batch([
       env.DB.prepare(
         `WITH ranked AS (
-           SELECT v.channel_key AS k, v.flag AS f, v.value AS val,
+           SELECT v.channel_key AS k, v.flag AS f, v.value AS val, u.created_at AS born,
                   CASE WHEN u.created_at > ?1 THEN 0.0 ELSE 1.0 END AS w,
                   ROW_NUMBER() OVER (PARTITION BY v.channel_key, v.flag, COALESCE(u.reg_net, u.id) ORDER BY u.created_at) AS rn
            FROM votes v JOIN users u ON u.id = v.user_id
            WHERE v.channel_key IN (${ph}))
-         SELECT k, f, COUNT(*) AS n, SUM(CASE WHEN w = 0 THEN 1 ELSE 0 END) AS young,
+         SELECT k, f, COUNT(*) AS n, MIN(CASE WHEN w = 0 THEN born END) AS young,
                 SUM(CASE WHEN val > 0 AND rn <= ?2 THEN w ELSE 0 END) AS up,
                 SUM(CASE WHEN val < 0 AND rn <= ?2 THEN w ELSE 0 END) AS down
          FROM ranked GROUP BY k, f`
@@ -244,10 +246,13 @@ async function rebuild(env) {
     for (const { key, rev } of part) {
       const s = score(t[key], ov[key], nm[key], c);
       if (s.entry) snap.c[key] = s.entry; else delete snap.c[key];
-      // Votes from installs still in their warm-up count later: keep those channels dirty
-      // so they are recounted once the installs are old enough.
-      const young = A.FLAGS.some(f => t[key]?.[f]?.young > 0);
-      updates.push({ key, rev, raw: s.raw, young, remove: s.total === 0 && !ov[key] });
+      // Votes from installs still in their warm-up count later: note when the first of
+      // them matures, so the channel is recounted then (without staying in the queue).
+      const born = A.FLAGS.map(f => t[key]?.[f]?.young).filter(Boolean);
+      const recheck = born.length ? Math.min(...born) + c.warmupMs + 1 : 0;
+      // Names are sent by voters and are not verified, so they are never published.
+      if (s.entry) snap.c[key][4] = '';
+      updates.push({ key, rev, raw: s.raw, recheck, remove: s.total === 0 && !ov[key] });
     }
   }
 
@@ -266,8 +271,8 @@ async function rebuild(env) {
     await env.DB.batch(part.map(u => (u.remove
       ? env.DB.prepare('DELETE FROM channels WHERE key = ? AND rev = ?').bind(u.key, u.rev)
       : env.DB.prepare(
-        'UPDATE channels SET ai_pct = ?, ai_n = ?, pe_pct = ?, pe_n = ?, dirty = ?, updated_at = ? WHERE key = ? AND rev = ?'
-      ).bind(u.raw.ai.pct, u.raw.ai.n, u.raw.pe.pct, u.raw.pe.n, u.young ? 1 : 0, now, u.key, u.rev))));
+        'UPDATE channels SET ai_pct = ?, ai_n = ?, pe_pct = ?, pe_n = ?, dirty = 0, recheck_at = ?, updated_at = ? WHERE key = ? AND rev = ?'
+      ).bind(u.raw.ai.pct, u.raw.ai.n, u.raw.pe.pct, u.raw.pe.n, u.recheck, now, u.key, u.rev))));
   }
   return { changed: dirty.length, total: Object.keys(snap.c).length };
 }

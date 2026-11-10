@@ -27,10 +27,12 @@ CREATE TABLE IF NOT EXISTS channels (
   pe_pct     INTEGER NOT NULL DEFAULT 0,
   pe_n       INTEGER NOT NULL DEFAULT 0,
   dirty      INTEGER NOT NULL DEFAULT 1,
+  recheck_at INTEGER NOT NULL DEFAULT 0,      -- when a vote from a still-new install starts to count (0 = none)
   rev        INTEGER NOT NULL DEFAULT 0,      -- bumped on every vote; a recount only clears dirty if unchanged
   updated_at INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS channels_dirty ON channels (dirty);
+CREATE INDEX IF NOT EXISTS channels_recheck ON channels (recheck_at);
 
 -- Your manual decisions. ai/pe: 1 = always show, 0 = never show, NULL = let votes decide.
 -- Edit with:  npx wrangler d1 execute argus --remote --command "INSERT OR REPLACE INTO overrides VALUES ('@x', NULL, 0, 'disputed')"

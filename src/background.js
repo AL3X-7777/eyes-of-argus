@@ -129,7 +129,7 @@ function applyMark(msg) {
     const m = readMark(marks[key]);
     const name = A.cleanName(msg.name);
     if (name) m.name = name;
-    if (A.isChannelId(msg.uc)) m.uc = msg.uc;
+    if (key.startsWith('@') && A.isChannelId(msg.uc)) m.uc = msg.uc;
     delete m.src; // you changed it yourself, so it is now your own opinion (sent as votes)
     const changed = Object.keys(changes).filter(f => m[f] !== changes[f]);
     Object.assign(m, changes);
@@ -150,21 +150,25 @@ function applyMark(msg) {
 /**
  * Merges an exported or shared file into your marks in one write.
  *
- * - `data.mine` (your own backup, written by "Export") restores exact values,
- *   including "Not" choices and UC ids, and counts as your votes when sync is on.
- * - `data.channels` (a shared list or a v0.1/v0.2 export) only fills in "yes" where you
- *   have no opinion, and is **not** sent as your votes: importing someone else's list
- *   must not turn their opinions into yours.
+ * - `mode: "restore"` ("Restore backup" in settings) reads `data.mine` and restores
+ *   exact values, including "Not" choices and UC ids; they count as your votes when
+ *   sync is on. Only for a file you exported yourself.
+ * - Any other mode ("Import list") reads `data.channels` and only fills in "yes" where
+ *   you have no opinion. It is **not** sent as your votes: every export also contains
+ *   a `mine` section, so the file alone can't prove whose opinions it holds; the
+ *   button you pressed decides.
  *
- * @param {{data: Object}} msg
+ * @param {{data: Object, mode: string}} msg
  * @returns {Promise<{ok: boolean, error: string, count: number}>}
  */
 function importData(msg) {
   return serial(async () => {
     const data = msg.data;
     if (!data || typeof data !== 'object') return { ok: false, error: 'not an Eyes of Argus file' };
-    const mine = data.mine && typeof data.mine === 'object' ? data.mine : null;
+    const restore = msg.mode === 'restore';
+    const mine = restore && data.mine && typeof data.mine === 'object' ? data.mine : null;
     const channels = data.channels && typeof data.channels === 'object' ? data.channels : null;
+    if (restore && !mine) return { ok: false, error: 'this file has no backup section; use "Import list" instead' };
     if (!mine && !channels) return { ok: false, error: 'not an Eyes of Argus file' };
 
     const { marks = {}, queue = {}, sync } = await get(['marks', 'queue', 'sync']);
@@ -182,7 +186,7 @@ function importData(msg) {
         Object.assign(m, next, { t });
         const name = A.cleanName(v.name);
         if (name) m.name = name;
-        if (A.isChannelId(v.uc)) m.uc = v.uc;
+        if (key.startsWith('@') && A.isChannelId(v.uc)) m.uc = v.uc;
         if (v.src === 'import') m.src = 'import'; else delete m.src;
         if (m.ai || m.pe) marks[key] = m; else delete marks[key];
         if (sync?.enabled && !m.src) { queueVotes(queue, key, m, changed, t); voted = true; }
@@ -652,9 +656,13 @@ const HANDLERS = {
 const FROM_TABS = new Set([MSG.MARK]);
 
 api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  const handler = HANDLERS[msg?.type];
-  if (!handler || sender?.id !== api.runtime.id) return undefined; // only our own extension
-  if (sender.tab && !FROM_TABS.has(msg.type)) return undefined;     // content scripts may only mark
+  if (!msg || typeof msg.type !== 'string' || !Object.hasOwn(HANDLERS, msg.type)) return undefined;
+  if (sender?.id !== api.runtime.id) return undefined; // only our own extension
+  // The settings page also opens in a tab, so pages are told apart by address: only the
+  // extension's own pages may do more than mark.
+  const ownPage = typeof sender.url === 'string' && sender.url.startsWith(api.runtime.getURL(''));
+  if (!ownPage && !FROM_TABS.has(msg.type)) return undefined;
+  const handler = HANDLERS[msg.type];
   Promise.resolve()
     .then(() => handler(msg))
     .then(sendResponse, e => sendResponse({ ok: false, error: String(e?.message || e) }));

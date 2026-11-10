@@ -53,7 +53,7 @@ test('votes are counted with weights, thresholds and overrides', async () => {
   const r = await post('/admin/rebuild', {}, { authorization: 'Bearer test-admin' });
   assert.equal(r.status, 200);
   const c = await snapshot();
-  assert.deepEqual(c['@slop'], [100, 2, 0, 0, 'Slop'], 'N10: 3 votes from one network, 2 count');
+  assert.deepEqual(c['@slop'], [100, 2, 0, 0, ''], 'N10: 3 votes from one network, 2 count; Q11: names are not published');
   assert.equal(c['@split'], undefined, '1 yes / 1 no stays hidden');
 
   srv.sql("INSERT INTO overrides VALUES ('@slop', 0, NULL, 'test')");
@@ -141,7 +141,9 @@ test('N1: votes from new installs are counted once their warm-up ends, without n
   for (const s of [a, b]) await post('/votes', { secret: s, votes: [{ k: '@warmup', f: 'ai', v: 1 }] });
   await recount();
   assert.equal((await snapshot())['@warmup'], undefined, 'still warming up');
-  srv.sql('UPDATE users SET created_at = 0'); // time passes
+  await recount();
+  assert.equal((await snapshot())['@warmup'], undefined, 'not rechecked early');
+  srv.sql('UPDATE users SET created_at = 0; UPDATE channels SET recheck_at = 1 WHERE recheck_at > 0'); // time passes
   await recount();
   assert.deepEqual((await snapshot())['@warmup'], [100, 2, 0, 0, '']);
 });

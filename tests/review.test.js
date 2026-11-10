@@ -60,7 +60,7 @@ test('F13/F12: export is lossless; own backup restores exactly; other lists are 
   const s = fakeStorage({ sync: { enabled: true, server: 'https://x.test' } });
   const { ask } = loadBackground(s);
   const mine = { '@a': { ai: -1, pe: 1, name: 'A', uc: 'UCabcdefghijklmnopqrstuv' } };
-  assert.equal((await ask({ type: 'argus-import', data: { mine } })).count, 1);
+  assert.equal((await ask({ type: 'argus-import', mode: 'restore', data: { mine } })).count, 1);
   assert.deepEqual([s.data.marks['@a'].ai, s.data.marks['@a'].pe, s.data.marks['@a'].uc], [-1, 1, 'UCabcdefghijklmnopqrstuv']);
   assert.equal(Object.keys(s.data.queue).length, 4, 'own backup votes for handle and UC id');
 
@@ -94,7 +94,7 @@ test('N2/N4: marking an imported channel yourself makes it your vote; backups ke
 
   const t = fakeStorage({ sync: { enabled: true, server: 'https://x.test' } });
   const b = loadBackground(t);
-  await b.ask({ type: 'argus-import', data: { mine: { '@y': { ai: 1, pe: 0, src: 'import' } } } });
+  await b.ask({ type: 'argus-import', mode: 'restore', data: { mine: { '@y': { ai: 1, pe: 0, src: 'import' } } } });
   assert.equal(t.data.marks['@y'].src, 'import');
   assert.equal(t.data.queue, undefined, 'imported-list marks in a backup are not voted');
 });
@@ -114,7 +114,8 @@ test('N9: a YouTube tab may only send marks', async () => {
     const r = api.runtime.onMessage.fns[0](msg, sender, resolve);
     if (r !== true) resolve('ignored');
   });
-  assert.equal(await call({ type: 'argus-wipe' }, { tab: { id: 1 } }), 'ignored');
+  const tab = { id: api.runtime.id, tab: { id: 1 }, url: 'https://www.youtube.com/' };
+  assert.equal(await call({ type: 'argus-wipe' }, tab), 'ignored');
   assert.ok(s.data.marks['@a']);
-  assert.equal((await call({ type: 'argus-mark', key: '@b', changes: { ai: 1 } }, { tab: { id: 1 } })).ok, true);
+  assert.equal((await call({ type: 'argus-mark', key: '@b', changes: { ai: 1 } }, tab)).ok, true);
 });

@@ -74,10 +74,11 @@
 
     <section class="card">
       <h2>Backup &amp; sharing</h2>
-      <p class="muted">Export your marks to share them or keep a backup. Importing your own backup restores it exactly. Importing someone else's list only adds "yes" marks where you have no opinion, and isn't sent as your votes.</p>
+      <p class="muted">Export your marks to share them or keep a backup. <b>Restore backup</b> is for a file you exported yourself: it restores it exactly. <b>Import list</b> is for someone else's file: it only adds "yes" marks where you have no opinion, and isn't sent as your votes.</p>
       <div class="inline">
         <button id="export">Export marks</button>
-        <button id="importBtn">Import…</button>
+        <button id="importBtn">Import list…</button>
+        <button id="restoreBtn">Restore backup…</button>
         <input type="file" id="importFile" accept=".json,application/json" hidden>
         <span class="grow"></span>
         <button id="wipe" class="danger">Delete all marks</button>
@@ -89,7 +90,7 @@
       <h2>Help</h2>
       <ol>
         <li><b>Right-click</b> a channel or account name, a video or post, a search result, or an empty spot on a channel or profile page. Works on YouTube, X, Reddit, Instagram, TikTok, Twitch, Facebook, and on Google, Bing and DuckDuckGo results (a result marks its whole website).</li>
-        <li>Choose <b>The Eyes of Argus → Mark as AI channel</b> or <b>Mark as private-equity owned</b>. A channel can have both.</li>
+        <li>Choose <b>The Eyes of Argus → Mark as AI</b> or <b>Mark as private-equity owned</b>. A channel can have both.</li>
         <li>Marked channels get a badge everywhere they appear. Use <b>Clear</b> to remove a mark.</li>
         <li>If you think a community mark is wrong, choose <b>Not AI</b> or <b>Not PE-owned</b>. That hides it for you and counts as a vote against it.</li>
       </ol>

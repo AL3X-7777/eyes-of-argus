@@ -19,12 +19,14 @@ com.sg com.hk com.tw co.th co.id com.my com.ph com.vn com.pk com.bd com.ng co.ke
 # for the right-click menu, and src/platforms.js has the matching adapter for each.
 SITES = [
     "*://*.youtube.com/*",
-    "*://*.x.com/*", "*://*.twitter.com/*",
-    "*://*.reddit.com/*",
-    "*://*.instagram.com/*",
-    "*://*.tiktok.com/*",
-    "*://*.twitch.tv/*",
-    "*://*.facebook.com/*",
+    # exact hosts only: help., developer. and similar subdomains have no profiles
+    "*://x.com/*", "*://www.x.com/*", "*://mobile.x.com/*",
+    "*://twitter.com/*", "*://www.twitter.com/*", "*://mobile.twitter.com/*",
+    "*://reddit.com/*", "*://www.reddit.com/*", "*://old.reddit.com/*", "*://new.reddit.com/*", "*://sh.reddit.com/*",
+    "*://instagram.com/*", "*://www.instagram.com/*",
+    "*://tiktok.com/*", "*://www.tiktok.com/*", "*://m.tiktok.com/*",
+    "*://twitch.tv/*", "*://www.twitch.tv/*", "*://m.twitch.tv/*",
+    "*://facebook.com/*", "*://www.facebook.com/*", "*://m.facebook.com/*", "*://web.facebook.com/*",
     "*://www.bing.com/search*",
     "*://duckduckgo.com/*", "*://html.duckduckgo.com/*",
     *[f"*://www.google.{tld}/search*" for tld in GOOGLE_TLDS],
@@ -39,7 +41,6 @@ BASE = {
     "description": "Mark YouTube channels, social accounts and search results that use AI or are owned by private equity. Works offline.",
     "icons": ICONS,
     "permissions": ["contextMenus", "storage", "alarms", "unlimitedStorage"],
-    "host_permissions": SITES,
     "optional_host_permissions": ["https://*/*", "http://localhost/*", "http://127.0.0.1/*"],
     "action": {"default_title": "The Eyes of Argus", "default_icon": ICONS},
     "options_ui": {"page": "options.html", "open_in_tab": True},
@@ -54,6 +55,7 @@ BASE = {
 TARGETS = {
     "firefox": {
         "background": {"scripts": ["shared.js", "background.js"]},
+        "host_permissions": SITES,  # Firefox only runs content scripts on hosts the user has granted
         "browser_specific_settings": {"gecko": {
             "id": "eyes-of-argus@argus.local",
             "strict_min_version": "142.0",
@@ -63,6 +65,8 @@ TARGETS = {
     "chrome": {
         "background": {"service_worker": "background.js"},  # loads shared.js via importScripts
         "minimum_chrome_version": "111",
+        # no host_permissions: Chrome runs declared content scripts without them, and
+        # nothing else here needs access to these sites
     },
 }
 

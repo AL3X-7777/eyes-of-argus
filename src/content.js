@@ -124,7 +124,10 @@
         const el = site.badgeEl ? site.badgeEl(a) : textLink(a);
         if (el) {
           if (el.dataset.argus !== m.st) el.dataset.argus = m.st;
-          if (m.title && el.title !== m.title) { el.title = m.title; el.dataset.argusTitle = '1'; }
+          if (m.title && el.title !== m.title) {
+            if (!el.dataset.argusTitle && el.title) el.dataset.argusTitleOrig = el.title; // keep the page's own tooltip
+            el.title = m.title; el.dataset.argusTitle = '1';
+          }
           tagged.set(el, m.title);
         }
         const card = site.cardSel && a.closest(site.cardSel);
@@ -138,15 +141,25 @@
     // Clean up everything tagged earlier that this pass didn't confirm
     for (const el of document.querySelectorAll('[data-argus], [data-argus-card], [data-argus-title]')) {
       if (tagged.has(el)) {
-        if (el.dataset.argusTitle && !tagged.get(el)) { el.removeAttribute('title'); delete el.dataset.argusTitle; }
+        if (el.dataset.argusTitle && !tagged.get(el)) restoreTitle(el);
         if (el.dataset.argusCard && !cards.has(el)) delete el.dataset.argusCard;
         continue;
       }
       delete el.dataset.argus;
       delete el.dataset.argusCard;
-      if (el.dataset.argusTitle) { el.removeAttribute('title'); delete el.dataset.argusTitle; }
+      if (el.dataset.argusTitle) restoreTitle(el);
     }
     taggedCount = tagged.size;
+  }
+
+  /**
+   * Removes our hover text and puts back the page's own, if it had one.
+   * @param {HTMLElement} el
+   */
+  function restoreTitle(el) {
+    if (el.dataset.argusTitleOrig) el.title = el.dataset.argusTitleOrig; else el.removeAttribute('title');
+    delete el.dataset.argusTitleOrig;
+    delete el.dataset.argusTitle;
   }
 
   let scheduled = false;
@@ -182,7 +195,26 @@
   // Right-click → account or website
   // ---------------------------------------------------------------------------
 
-  document.addEventListener('contextmenu', e => { lastTarget = { el: e.target, at: Date.now() }; }, true);
+  // composedPath()[0] is the real element even inside a web component's shadow root
+  document.addEventListener('contextmenu', e => {
+    lastTarget = { el: (e.composedPath && e.composedPath()[0]) || e.target, at: Date.now() };
+  }, true);
+
+  /**
+   * `Element.closest` that also climbs out of shadow roots.
+   * @param {Element} el
+   * @param {string} sel
+   * @returns {?Element}
+   */
+  function closestDeep(el, sel) {
+    for (let cur = el; cur;) {
+      const hit = cur.closest ? cur.closest(sel) : null;
+      if (hit) return hit;
+      const rootNode = cur.getRootNode ? cur.getRootNode() : null;
+      cur = rootNode && rootNode.host ? rootNode.host : null;
+    }
+    return null;
+  }
 
   /**
    * @param {?Element} a
@@ -200,8 +232,8 @@
    * @returns {?{key: string, name: string, uc: string}} null when unsure
    */
   function resolve(el) {
-    const box = boxSel ? el.closest(boxSel) : null;
-    const direct = fromAnchor(el.closest('a[href]'));
+    const box = boxSel ? closestDeep(el, boxSel) : null;
+    const direct = fromAnchor(closestDeep(el, 'a[href]'));
     if (direct) return finish(direct, box);
 
     if (box) {
@@ -251,7 +283,7 @@
     const a = ACTIONS[action];
     const target = lastTarget && Date.now() - lastTarget.at < TARGET_MAX_AGE_MS ? lastTarget.el : null;
     lastTarget = null; // one right-click, one action
-    const t = target && target.closest ? resolve(target) : null;
+    const t = target && target.nodeType === 1 ? resolve(target) : target && target.parentElement ? resolve(target.parentElement) : null;
     if (!t) { toast('Nothing to mark here. Right-click an account name, a post or a search result', true); return; }
     try {
       const res = await api.runtime.sendMessage({ type: MSG.MARK, key: t.key, name: t.name, uc: t.uc, changes: a.changes });

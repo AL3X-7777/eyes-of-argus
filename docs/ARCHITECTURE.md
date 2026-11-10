@@ -8,12 +8,31 @@ Regenerate it with `npm run docs`.
 | File | Runs in | Job |
 |---|---|---|
 | `src/shared.js` | everywhere (also imported by the server) | key normalization, vote values, hashing, message names, limits |
-| `src/content.js` + `content.css` | YouTube tabs (top frame) | tags channel links and cards with `data-argus` attributes, which CSS shows as badges; works out which channel was right-clicked |
+| `src/platforms.js` | supported sites | one adapter per site: which links are accounts or results, how to turn a link into a key, what counts as a card |
+| `src/content.js` + `content.css` | supported sites (top frame) | generic: tags links and cards with `data-argus` attributes, which CSS shows as badges; works out what was right-clicked |
 | `src/background.js` | Firefox event page / Chromium service worker | context menu; **only writer** of marks, vote queue and sync settings; community sync; shared list |
 | `src/options.html/.js/.css` | settings page | shows and edits everything by sending messages to the background |
 | `server/src/index.js` | Cloudflare Worker | registration, votes, forget, snapshot, recount cron |
 | `server/src/lib.js` | Worker (and Node tests) | config, IPv6 grouping, request checks, scoring |
 | `build.py` | your PC | builds `dist/firefox` and `dist/chrome` with the right manifest each |
+
+## Keys
+
+| What | Key | Example |
+|---|---|---|
+| YouTube channel | `@handle` or `UC…` id (unprefixed, as in earlier versions) | `@nileblue` |
+| X account | `x:handle` | `x:nasa` |
+| Reddit user / subreddit | `reddit:u/name`, `reddit:r/name` | `reddit:r/askreddit` |
+| Instagram, TikTok, Twitch, Facebook | `instagram:…`, `tiktok:…`, `twitch:…`, `facebook:…` | `twitch:somestreamer` |
+| Website (from a search result) | `site:hostname` without `www.` | `site:example.com` |
+
+`Argus.normalizeKey` is the only place that decides what a valid key is; the extension and the
+server both use it. On Google, Bing and DuckDuckGo a result is keyed by its website, except when it
+points at a supported platform: then it is keyed by the account (`x:nasa`), and a result that
+points at the platform itself can't be marked, so one result can never mark all of YouTube.
+
+To support another site: add an adapter to `src/platforms.js`, its hosts to `SITES` in `build.py`,
+and, for a new key prefix, an entry in `PLATFORMS` in `src/shared.js`.
 
 ## Data flow
 
@@ -51,13 +70,13 @@ Display priority for each flag: **your mark** (yes / not) → **shared list** �
 |---|---|---|---|
 | `argus-menu` | background → content | `{action}` | none |
 | `argus-mark` | content/options → background | `{key, name?, uc?, changes: {ai?, pe?}}` | `{ok, mark}` |
-| `argus-import` | options → background | `{data}` (export file) | `{ok, count}` |
+| `argus-import` | options → background | `{data, mode}`; `mode: "restore"` reads `mine`, anything else reads `channels` | `{ok, count}` |
 | `argus-wipe` | options → background | none | `{ok}` |
 | `argus-sync-config` | options → background | `{enabled, server?, withdraw?}` | `{ok}` |
 | `argus-sync-now` | options → background | none | sync status |
 | `argus-update-list` | options → background | none | `{ok, count}` |
 
-The background only answers messages from its own extension (`sender.id`). YouTube tabs may only send `argus-mark`.
+The background only answers messages from its own extension (`sender.id`). Pages are told apart by address: only the extension's own pages may send anything other than `argus-mark` (the settings page also runs in a tab, so `sender.tab` can't be used for this).
 
 ## File formats
 
@@ -70,8 +89,9 @@ The background only answers messages from its own extension (`sender.id`). YouTu
 ```
 
 `channels` is the simple format, which any shared list or older export uses. `mine` is the exact backup.
-Importing `mine` restores your choices (and votes them if sync is on). Importing only `channels`
-adds "yes" where you have no opinion and is **not** sent as your votes.
+**Restore backup** reads `mine` and restores your choices (and votes them if sync is on).
+**Import list** reads `channels`, adds "yes" where you have no opinion and is **not** sent as your
+votes. The button decides, because every export contains both sections.
 
 **Community snapshot** (`GET /snapshot.json`):
 
@@ -80,7 +100,7 @@ adds "yes" where you have no opinion and is **not** sent as your votes.
   "c": { "@x": [92, 41, 0, 0, "X"], "UC…": [100, 0, 0, 0, "Y", 1] } }
 ```
 
-Each entry is `[aiPct, aiVotes, pePct, peVotes, name, overrideBits?]`. The vote counts include only votes that counted (weighted, network cap applied). A pct of 0 means not shown.
+Each entry is `[aiPct, aiVotes, pePct, peVotes, "", overrideBits?]` (the fifth slot is always empty: names come from voters and are never published). The vote counts include only votes that counted (weighted, network cap applied). A pct of 0 means not shown.
 In `overrideBits`, 1 means AI was set by the admin and 2 means PE was.
 
 ## Server API
@@ -98,7 +118,9 @@ All POSTs require `content-type: application/json` and a body of 64 KB or less. 
 
 ## Tests and tooling
 
-`npm test` runs 30 tests: content script, background, server end-to-end against a real local
-`wrangler dev`, and regression tests for every review finding. `npm run lint` runs ESLint and
+`npm test` runs 68 tests: content script on every platform, background, settings page, server
+end-to-end against a real local `wrangler dev`, and regression tests for every review finding.
+`npm run test:browser` loads the Chrome build into a real Chrome and checks the service worker,
+the settings page and badges on locally served copies of YouTube, Google, X and Reddit pages. `npm run lint` runs ESLint and
 web-ext lint. `npm run docs` generates the API reference. `.github/workflows/ci.yml` runs build,
 lint and tests on every push.

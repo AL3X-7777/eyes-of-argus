@@ -70,7 +70,8 @@ const api = globalThis.browser ?? globalThis.chrome;
 const A = globalThis.Argus;
 const { FLAGS, MSG, LIMITS } = A;
 
-const YT = ['*://*.youtube.com/*'];
+/** Sites the menu appears on: the same list the content script runs on (see build.py). */
+const SITES = api.runtime.getManifest?.().content_scripts?.[0]?.matches || ['*://*.youtube.com/*'];
 const SYNC_ALARM = 'argus-sync';        // periodic: download the community list, retry votes
 const FLUSH_ALARM = 'argus-flush';      // one-shot backup for sending fresh votes
 const SHARED_ALARM = 'argus-shared';    // periodic: refresh the subscribed shared list
@@ -156,7 +157,7 @@ function applyMark(msg) {
     const m = readMark(marks[key]);
     const name = A.cleanName(msg.name);
     if (name) m.name = name;
-    if (A.isChannelId(msg.uc)) m.uc = msg.uc;
+    if (key.startsWith('@') &amp;&amp; A.isChannelId(msg.uc)) m.uc = msg.uc;
     delete m.src; // you changed it yourself, so it is now your own opinion (sent as votes)
     const changed = Object.keys(changes).filter(f => m[f] !== changes[f]);
     Object.assign(m, changes);
@@ -177,21 +178,25 @@ function applyMark(msg) {
 /**
  * Merges an exported or shared file into your marks in one write.
  *
- * - `data.mine` (your own backup, written by "Export") restores exact values,
- *   including "Not" choices and UC ids, and counts as your votes when sync is on.
- * - `data.channels` (a shared list or a v0.1/v0.2 export) only fills in "yes" where you
- *   have no opinion, and is **not** sent as your votes: importing someone else's list
- *   must not turn their opinions into yours.
+ * - `mode: "restore"` ("Restore backup" in settings) reads `data.mine` and restores
+ *   exact values, including "Not" choices and UC ids; they count as your votes when
+ *   sync is on. Only for a file you exported yourself.
+ * - Any other mode ("Import list") reads `data.channels` and only fills in "yes" where
+ *   you have no opinion. It is **not** sent as your votes: every export also contains
+ *   a `mine` section, so the file alone can't prove whose opinions it holds; the
+ *   button you pressed decides.
  *
- * @param {{data: Object}} msg
+ * @param {{data: Object, mode: string}} msg
  * @returns {Promise&lt;{ok: boolean, error: string, count: number}>}
  */
 function importData(msg) {
   return serial(async () => {
     const data = msg.data;
     if (!data || typeof data !== 'object') return { ok: false, error: 'not an Eyes of Argus file' };
-    const mine = data.mine &amp;&amp; typeof data.mine === 'object' ? data.mine : null;
+    const restore = msg.mode === 'restore';
+    const mine = restore &amp;&amp; data.mine &amp;&amp; typeof data.mine === 'object' ? data.mine : null;
     const channels = data.channels &amp;&amp; typeof data.channels === 'object' ? data.channels : null;
+    if (restore &amp;&amp; !mine) return { ok: false, error: 'this file has no backup section; use "Import list" instead' };
     if (!mine &amp;&amp; !channels) return { ok: false, error: 'not an Eyes of Argus file' };
 
     const { marks = {}, queue = {}, sync } = await get(['marks', 'queue', 'sync']);
@@ -209,7 +214,7 @@ function importData(msg) {
         Object.assign(m, next, { t });
         const name = A.cleanName(v.name);
         if (name) m.name = name;
-        if (A.isChannelId(v.uc)) m.uc = v.uc;
+        if (key.startsWith('@') &amp;&amp; A.isChannelId(v.uc)) m.uc = v.uc;
         if (v.src === 'import') m.src = 'import'; else delete m.src;
         if (m.ai || m.pe) marks[key] = m; else delete marks[key];
         if (sync?.enabled &amp;&amp; !m.src) { queueVotes(queue, key, m, changed, t); voted = true; }
@@ -617,8 +622,8 @@ async function buildMenus() {
   if (!api.contextMenus) return;
   await api.contextMenus.removeAll();
   const add = o => api.contextMenus.create({ contexts: MENU_CONTEXTS, ...o });
-  add({ id: 'argus', title: 'The Eyes of Argus', documentUrlPatterns: YT });
-  add({ id: 'ai', parentId: 'argus', title: 'Mark as AI channel' });
+  add({ id: 'argus', title: 'The Eyes of Argus', documentUrlPatterns: SITES });
+  add({ id: 'ai', parentId: 'argus', title: 'Mark as AI' });
   add({ id: 'pe', parentId: 'argus', title: 'Mark as private-equity owned' });
   add({ id: 'sep1', parentId: 'argus', type: 'separator' });
   add({ id: 'notai', parentId: 'argus', title: 'Not AI (disagree)' });
@@ -679,9 +684,13 @@ const HANDLERS = {
 const FROM_TABS = new Set([MSG.MARK]);
 
 api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  const handler = HANDLERS[msg?.type];
-  if (!handler || sender?.id !== api.runtime.id) return undefined; // only our own extension
-  if (sender.tab &amp;&amp; !FROM_TABS.has(msg.type)) return undefined;     // content scripts may only mark
+  if (!msg || typeof msg.type !== 'string' || !Object.hasOwn(HANDLERS, msg.type)) return undefined;
+  if (sender?.id !== api.runtime.id) return undefined; // only our own extension
+  // The settings page also opens in a tab, so pages are told apart by address: only the
+  // extension's own pages may do more than mark.
+  const ownPage = typeof sender.url === 'string' &amp;&amp; sender.url.startsWith(api.runtime.getURL(''));
+  if (!ownPage &amp;&amp; !FROM_TABS.has(msg.type)) return undefined;
+  const handler = HANDLERS[msg.type];
   Promise.resolve()
     .then(() => handler(msg))
     .then(sendResponse, e => sendResponse({ ok: false, error: String(e?.message || e) }));
@@ -697,7 +706,7 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 </div>
 
 <nav>
-    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="HttpError.html">HttpError</a></li></ul><h3>Global</h3><ul><li><a href="global.html#A">A</a></li><li><a href="global.html#CACHE_KEY">CACHE_KEY</a></li><li><a href="global.html#CORS_GET">CORS_GET</a></li><li><a href="global.html#DAY">DAY</a></li><li><a href="global.html#FROM_TABS">FROM_TABS</a></li><li><a href="global.html#HANDLERS">HANDLERS</a></li><li><a href="global.html#IMPORT">IMPORT</a></li><li><a href="global.html#MARK">MARK</a></li><li><a href="global.html#MAX_BATCH">MAX_BATCH</a></li><li><a href="global.html#MAX_BODY">MAX_BODY</a></li><li><a href="global.html#MAX_NAME">MAX_NAME</a></li><li><a href="global.html#MENU">MENU</a></li><li><a href="global.html#POW_MAX_BITS">POW_MAX_BITS</a></li><li><a href="global.html#SYNC_CONFIG">SYNC_CONFIG</a></li><li><a href="global.html#SYNC_NOW">SYNC_NOW</a></li><li><a href="global.html#UPDATE_LIST">UPDATE_LIST</a></li><li><a href="global.html#WIPE">WIPE</a></li><li><a href="global.html#allow">allow</a></li><li><a href="global.html#applyMark">applyMark</a></li><li><a href="global.html#buildMenus">buildMenus</a></li><li><a href="global.html#cfg">cfg</a></li><li><a href="global.html#chunks">chunks</a></li><li><a href="global.html#configureSync">configureSync</a></li><li><a href="global.html#dirtyUserChannels">dirtyUserChannels</a></li><li><a href="global.html#ensureIdentity">ensureIdentity</a></li><li><a href="global.html#expandV6">expandV6</a></li><li><a href="global.html#fetchCommunity">fetchCommunity</a></li><li><a href="global.html#flushQueue">flushQueue</a></li><li><a href="global.html#forget">forget</a></li><li><a href="global.html#get">get</a></li><li><a href="global.html#importData">importData</a></li><li><a href="global.html#json">json</a></li><li><a href="global.html#netHash">netHash</a></li><li><a href="global.html#netOf">netOf</a></li><li><a href="global.html#normalizeShared">normalizeShared</a></li><li><a href="global.html#num">num</a></li><li><a href="global.html#originAllowed">originAllowed</a></li><li><a href="global.html#post">post</a></li><li><a href="global.html#queueVotes">queueVotes</a></li><li><a href="global.html#readJson">readJson</a></li><li><a href="global.html#readMark">readMark</a></li><li><a href="global.html#rebuild">rebuild</a></li><li><a href="global.html#register">register</a></li><li><a href="global.html#safeEqual">safeEqual</a></li><li><a href="global.html#scheduleFlush">scheduleFlush</a></li><li><a href="global.html#score">score</a></li><li><a href="global.html#sendPendingForget">sendPendingForget</a></li><li><a href="global.html#serial">serial</a></li><li><a href="global.html#set">set</a></li><li><a href="global.html#setup">setup</a></li><li><a href="global.html#snapshot">snapshot</a></li><li><a href="global.html#solvePow">solvePow</a></li><li><a href="global.html#syncNow">syncNow</a></li><li><a href="global.html#syncOnce">syncOnce</a></li><li><a href="global.html#unqueue">unqueue</a></li><li><a href="global.html#updateShared">updateShared</a></li><li><a href="global.html#userFromSecret">userFromSecret</a></li><li><a href="global.html#votes">votes</a></li><li><a href="global.html#wipe">wipe</a></li></ul>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="HttpError.html">HttpError</a></li></ul><h3>Global</h3><ul><li><a href="global.html#A">A</a></li><li><a href="global.html#CACHE_KEY">CACHE_KEY</a></li><li><a href="global.html#CORS_GET">CORS_GET</a></li><li><a href="global.html#DAY">DAY</a></li><li><a href="global.html#FROM_TABS">FROM_TABS</a></li><li><a href="global.html#HANDLERS">HANDLERS</a></li><li><a href="global.html#IMPORT">IMPORT</a></li><li><a href="global.html#MARK">MARK</a></li><li><a href="global.html#MAX_BATCH">MAX_BATCH</a></li><li><a href="global.html#MAX_BODY">MAX_BODY</a></li><li><a href="global.html#MAX_NAME">MAX_NAME</a></li><li><a href="global.html#MENU">MENU</a></li><li><a href="global.html#POW_MAX_BITS">POW_MAX_BITS</a></li><li><a href="global.html#SITES">SITES</a></li><li><a href="global.html#SYNC_CONFIG">SYNC_CONFIG</a></li><li><a href="global.html#SYNC_NOW">SYNC_NOW</a></li><li><a href="global.html#UPDATE_LIST">UPDATE_LIST</a></li><li><a href="global.html#WIPE">WIPE</a></li><li><a href="global.html#allow">allow</a></li><li><a href="global.html#applyMark">applyMark</a></li><li><a href="global.html#buildMenus">buildMenus</a></li><li><a href="global.html#cfg">cfg</a></li><li><a href="global.html#chunks">chunks</a></li><li><a href="global.html#configureSync">configureSync</a></li><li><a href="global.html#dirtyUserChannels">dirtyUserChannels</a></li><li><a href="global.html#ensureIdentity">ensureIdentity</a></li><li><a href="global.html#expandV6">expandV6</a></li><li><a href="global.html#fetchCommunity">fetchCommunity</a></li><li><a href="global.html#flushQueue">flushQueue</a></li><li><a href="global.html#forHost">forHost</a></li><li><a href="global.html#forget">forget</a></li><li><a href="global.html#get">get</a></li><li><a href="global.html#importData">importData</a></li><li><a href="global.html#json">json</a></li><li><a href="global.html#netHash">netHash</a></li><li><a href="global.html#netOf">netOf</a></li><li><a href="global.html#normalizeShared">normalizeShared</a></li><li><a href="global.html#num">num</a></li><li><a href="global.html#originAllowed">originAllowed</a></li><li><a href="global.html#post">post</a></li><li><a href="global.html#queueVotes">queueVotes</a></li><li><a href="global.html#readJson">readJson</a></li><li><a href="global.html#readMark">readMark</a></li><li><a href="global.html#rebuild">rebuild</a></li><li><a href="global.html#register">register</a></li><li><a href="global.html#safeEqual">safeEqual</a></li><li><a href="global.html#scheduleFlush">scheduleFlush</a></li><li><a href="global.html#score">score</a></li><li><a href="global.html#sendPendingForget">sendPendingForget</a></li><li><a href="global.html#serial">serial</a></li><li><a href="global.html#set">set</a></li><li><a href="global.html#setup">setup</a></li><li><a href="global.html#snapshot">snapshot</a></li><li><a href="global.html#solvePow">solvePow</a></li><li><a href="global.html#syncNow">syncNow</a></li><li><a href="global.html#syncOnce">syncOnce</a></li><li><a href="global.html#unqueue">unqueue</a></li><li><a href="global.html#updateShared">updateShared</a></li><li><a href="global.html#userFromSecret">userFromSecret</a></li><li><a href="global.html#votes">votes</a></li><li><a href="global.html#wipe">wipe</a></li></ul>
 </nav>
 
 <br class="clear">

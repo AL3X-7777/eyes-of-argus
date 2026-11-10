@@ -276,22 +276,25 @@
     setStatus($('#ioStatus'), `Exported ${Object.keys(data.mine).length} channels.`, 'ok');
   });
 
-  $('#importBtn').addEventListener('click', () => $('#importFile').click());
+  let importMode = 'merge';
+  $('#importBtn').addEventListener('click', () => { importMode = 'merge'; $('#importFile').click(); });
+  $('#restoreBtn').addEventListener('click', () => { importMode = 'restore'; $('#importFile').click(); });
   $('#importFile').addEventListener('change', async e => {
     const file = e.target.files[0];
     e.target.value = '';
     if (!file) return;
     let data;
     try { data = JSON.parse(await file.text()); } catch { return setStatus($('#ioStatus'), 'Import failed: the file isn\'t valid JSON.', 'err'); }
-    const res = await ask({ type: MSG.IMPORT, data });
+    const res = await ask({ type: MSG.IMPORT, data, mode: importMode });
     if (res.ok) setStatus($('#ioStatus'), `Imported ${res.count} channels.`, 'ok');
     else setStatus($('#ioStatus'), `Import failed: ${res.error}`, 'err');
   });
 
   $('#wipe').addEventListener('click', async () => {
     if (!confirm('Delete all of your marks? This can\'t be undone (export first if you want a backup).')) return;
-    await ask({ type: MSG.WIPE });
-    setStatus($('#ioStatus'), 'All marks deleted.');
+    const res = await ask({ type: MSG.WIPE });
+    if (res.ok) setStatus($('#ioStatus'), 'All marks deleted.');
+    else setStatus($('#ioStatus'), `Couldn't delete: ${res.error}`, 'err');
   });
 
   // ---------------------------------------------------------------------------

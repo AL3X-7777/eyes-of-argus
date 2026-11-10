@@ -88,6 +88,8 @@
   const youtube = {
     id: 'youtube',
     test: host => /(^|\.)youtube\.com$/.test(host),
+    domainRe: /(^|\.)youtube\.com$/,
+    fromUrl: u => A.keyFromHref(u.href),
     owns: key => !key.includes(':'),
     linkSel: 'a[href*="/@"], a[href*="/channel/UC"]',
     cardSel: YT_CARD,
@@ -126,13 +128,17 @@
 
   /**
    * Adapter for a site where accounts live at `/<name>`.
-   * @param {Object} o `{id, hostRe, linkSel, cardSel, reserved, tabs, guessFromCard, at}`
+   * @param {Object} o `{id, hostRe, domainRe, linkSel, cardSel, reserved, tabs, guessFromCard, at}`.
+   *   `hostRe` lists the exact hosts where `/<name>` is a profile (not help or developer
+   *   subdomains); `domainRe` matches the whole domain.
    */
   function profileSite(o) {
     const fromPath = firstSegment(o.id, o.reserved, o.tabs);
     return {
       id: o.id,
       test: host => o.hostRe.test(host),
+      domainRe: o.domainRe,
+      fromUrl: u => (o.hostRe.test(u.hostname) ? fromPath(u.pathname, true) : null),
       owns: key => key.startsWith(o.id + ':'),
       linkSel: o.linkSel,
       cardSel: o.cardSel,
@@ -150,7 +156,8 @@
 
   const x = profileSite({
     id: 'x',
-    hostRe: /(^|\.)(x|twitter)\.com$/,
+    hostRe: /^(www\.|mobile\.)?(x|twitter)\.com$/,
+    domainRe: /(^|\.)(x|twitter)\.com$/,
     // Author names of posts and user lists only; @mentions inside post text are not
     // badged (but can still be right-clicked).
     linkSel: '[data-testid="User-Name"] a[href^="/"], [data-testid="UserCell"] a[href^="/"]',
@@ -164,7 +171,8 @@
 
   const instagram = profileSite({
     id: 'instagram',
-    hostRe: /(^|\.)instagram\.com$/,
+    hostRe: /^(www\.)?instagram\.com$/,
+    domainRe: /(^|\.)instagram\.com$/,
     linkSel: 'a[href^="/"]',
     cardSel: 'article',
     guessFromCard: true,
@@ -177,7 +185,8 @@
 
   const twitch = profileSite({
     id: 'twitch',
-    hostRe: /(^|\.)twitch\.tv$/,
+    hostRe: /^(www\.|m\.)?twitch\.tv$/,
+    domainRe: /(^|\.)twitch\.tv$/,
     linkSel: 'a[href^="/"]',
     cardSel: 'article',
     guessFromCard: true,
@@ -187,7 +196,7 @@
       'privacy', 'legal', 'login', 'signup', 'payments', 'following', 'broadcast', 'collections', 'event', 'events', 'bits'],
   });
 
-  const HOST_FB = /(^|\.)facebook\.com$/;
+  const HOST_FB = /^(www\.|m\.|web\.)?facebook\.com$/;
   const fbPath = firstSegment('facebook', ['watch', 'marketplace', 'groups', 'gaming', 'events', 'pages', 'friends',
     'messages', 'notifications', 'bookmarks', 'login', 'help', 'settings', 'stories', 'reel', 'reels', 'photo',
     'photos', 'videos', 'hashtag', 'share', 'sharer', 'privacy', 'policies', 'ads', 'business', 'me', 'home.php',
@@ -205,6 +214,8 @@
   const facebook = {
     id: 'facebook',
     test: host => HOST_FB.test(host),
+    domainRe: /(^|\.)facebook\.com$/,
+    fromUrl: u => (HOST_FB.test(u.hostname) ? fbKey(u.pathname, u.search, true) : null),
     owns: key => key.startsWith('facebook:'),
     linkSel: 'a[href*="facebook.com/"], a[href^="/"]',
     cardSel: '[role="article"]',
@@ -219,7 +230,7 @@
     },
   };
 
-  const HOST_TT = /(^|\.)tiktok\.com$/;
+  const HOST_TT = /^(www\.|m\.)?tiktok\.com$/;
   /**
    * @param {string} path
    * @param {boolean} anyDepth also accept pages below a profile (videos)
@@ -232,6 +243,8 @@
   const tiktok = {
     id: 'tiktok',
     test: host => HOST_TT.test(host),
+    domainRe: /(^|\.)tiktok\.com$/,
+    fromUrl: u => (HOST_TT.test(u.hostname) ? ttKey(u.pathname, true) : null),
     owns: key => key.startsWith('tiktok:'),
     linkSel: 'a[href*="/@"]',
     cardSel: 'article, [data-e2e="recommend-list-item-container"], [data-e2e="search_top-item"]',
@@ -246,14 +259,14 @@
     },
   };
 
-  const HOST_RD = /(^|\.)reddit\.com$/;
+  const HOST_RD = /^(www\.|old\.|new\.|sh\.)?reddit\.com$/;
   /**
    * @param {string} path
    * @param {boolean} anyDepth also accept pages below a subreddit (posts)
    * @returns {string|null} `reddit:u/name` or `reddit:r/sub`
    */
   const rdKey = (path, anyDepth) => {
-    let m = path.match(/^\/(?:user|u)\/([^/?#]+)/i);
+    let m = path.match(anyDepth ? /^\/(?:user|u)\/([^/?#]+)/i : /^\/(?:user|u)\/([^/?#]+)\/?$/i);
     if (m) return A.normalizeKey('reddit:u/' + m[1]);
     m = path.match(anyDepth ? /^\/r\/([^/?#]+)/i : /^\/r\/([^/?#]+)\/?$/i);
     return m ? A.normalizeKey('reddit:r/' + m[1]) : null;
@@ -261,6 +274,8 @@
   const reddit = {
     id: 'reddit',
     test: host => HOST_RD.test(host),
+    domainRe: /(^|\.)reddit\.com$/,
+    fromUrl: u => (HOST_RD.test(u.hostname) ? rdKey(u.pathname, true) : null),
     owns: key => key.startsWith('reddit:'),
     linkSel: 'a[href*="/user/"], a[href*="/u/"], a[href*="/r/"]',
     cardSel: 'shreddit-post, article, .thing',
@@ -276,25 +291,33 @@
   };
 
   // ---------------------------------------------------------------------------
-  // Search engines: each result is marked by its website (`site:example.com`)
+  // Search engines: a result is marked by its website (`site:example.com`), or, when
+  // it points at a supported platform, by the account it belongs to (`x:nasa`), so one
+  // result can never mark all of YouTube or X.
   // ---------------------------------------------------------------------------
+
+  /** Platforms whose pages belong to accounts rather than to "the website". */
+  const ACCOUNT_SITES = [youtube, x, reddit, instagram, tiktok, twitch, facebook];
 
   /**
    * The real destination of a search-result link, unwrapping the engines' redirect links.
+   * Redirects are only unwrapped for links on the engine's own host, so a look-alike
+   * domain can't pose as a redirect to another site.
    * @param {Element} a
-   * @returns {string|null} absolute http(s) URL
+   * @param {Object} o the search adapter's options
+   * @returns {string|null} absolute URL
    */
-  function destination(a) {
+  function destination(a, o) {
     const href = a.getAttribute('href');
     if (!href) return null;
     let u;
     try { u = new URL(href, root.location.href); } catch { return null; }
     const h = u.hostname;
-    if (/(^|\.)google\.[a-z.]+$/.test(h) && u.pathname === '/url') {
-      return u.searchParams.get('q') || u.searchParams.get('url');
-    }
-    if (/(^|\.)duckduckgo\.com$/.test(h) && u.pathname.startsWith('/l/')) return u.searchParams.get('uddg');
-    if (/(^|\.)bing\.com$/.test(h) && u.pathname.startsWith('/ck/')) {
+    const own = h === root.location.hostname || (o.id === 'duckduckgo' && o.hostRe.test(h));
+    if (!own) return u.href;
+    if (o.id === 'google' && u.pathname === '/url') return u.searchParams.get('q') || u.searchParams.get('url');
+    if (o.id === 'duckduckgo' && u.pathname.startsWith('/l/')) return u.searchParams.get('uddg');
+    if (o.id === 'bing' && u.pathname.startsWith('/ck/')) {
       const raw = u.searchParams.get('u') || '';
       if (!raw.startsWith('a1')) return null;
       try { return root.atob(raw.slice(2).replace(/-/g, '+').replace(/_/g, '/')); } catch { return null; }
@@ -310,18 +333,21 @@
     return {
       id: o.id,
       test: host => o.hostRe.test(host),
-      owns: key => key.startsWith('site:'),
+      owns: () => true, // results can point at websites and at accounts on any platform
       linkSel: o.linkSel,
       cardSel: o.cardSel,
       guessFromCard: true,
       badgeEl: o.badgeEl,
       keyOf(a) {
-        const dest = destination(a);
-        const key = dest && A.siteKey(dest);
+        const dest = destination(a, o);
+        let u;
+        try { u = new URL(dest); } catch { return null; }
+        for (const p of ACCOUNT_SITES) if (p.domainRe.test(u.hostname)) return p.fromUrl(u);
+        const key = A.siteKey(u.href);
         // links back to the results page itself are not results
         return key && idOf(key) !== root.location.hostname.replace(/^www\./, '') ? key : null;
       },
-      nameOf: (_a, key) => idOf(key),
+      nameOf: (_a, key) => (key.startsWith('site:') ? idOf(key) : key),
     };
   }
 
@@ -342,7 +368,7 @@
 
   const duckduckgo = searchSite({
     id: 'duckduckgo',
-    hostRe: /(^|\.)duckduckgo\.com$/,
+    hostRe: /^(html\.|lite\.|www\.)?duckduckgo\.com$/,
     linkSel: 'a[data-testid="result-title-a"], a.result__a',
     cardSel: 'article, .result',
   });

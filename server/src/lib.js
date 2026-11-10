@@ -90,9 +90,9 @@ export async function readJson(req) {
   }
   const max = A.LIMITS.MAX_BODY;
   if (Number(req.headers.get('content-length') || 0) > max) return { ok: false, status: 413, error: 'body too large' };
-  const text = await req.text();
-  if (text.length > max) return { ok: false, status: 413, error: 'body too large' };
-  try { return { ok: true, body: JSON.parse(text) }; } catch { return { ok: false, status: 400, error: 'invalid JSON' }; }
+  const bytes = await req.arrayBuffer(); // bytes, not characters: multi-byte text can't slip past
+  if (bytes.byteLength > max) return { ok: false, status: 413, error: 'body too large' };
+  try { return { ok: true, body: JSON.parse(new TextDecoder().decode(bytes)) }; } catch { return { ok: false, status: 400, error: 'invalid JSON' }; }
 }
 
 /**

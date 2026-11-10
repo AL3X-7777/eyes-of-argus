@@ -44,14 +44,15 @@
 
     <section>
         <article><h1>The Eyes of Argus</h1>
-<p>A browser extension that marks YouTube channels that use AI and/or are owned by private equity.
+<p>A browser extension that marks YouTube channels, social media accounts and websites that use AI and/or are owned by private equity.</p>
+<p>Works on YouTube, X, Reddit, Instagram, TikTok, Twitch and Facebook, and on Google, Bing and DuckDuckGo results (a result marks its whole website).
 Right-click a channel name or video → <strong>The Eyes of Argus</strong> → mark it. Works offline, with no account.
 Optional community sync through a tiny self-hosted server (see <code>server/README.md</code>).</p>
 <h2>Install</h2>
 <p><strong>Firefox (for testing)</strong></p>
 <ol>
 <li>Open <code>about:debugging#/runtime/this-firefox</code></li>
-<li>Click <strong>Load Temporary Add-on…</strong> and pick <code>eyes-of-argus-firefox-0.3.1.zip</code></li>
+<li>Click <strong>Load Temporary Add-on…</strong> and pick <code>eyes-of-argus-firefox-0.4.0.zip</code></li>
 <li>Reload any open YouTube tabs</li>
 </ol>
 <p>Temporary add-ons disappear when Firefox restarts. To keep it installed, upload the zip to
@@ -59,7 +60,7 @@ https://addons.mozilla.org/developers/ as <strong>&quot;On your own&quot;</stron
 get a signed <code>.xpi</code> you can install permanently.</p>
 <p><strong>Chrome / Edge / Brave / Opera</strong></p>
 <ol>
-<li>Unzip <code>eyes-of-argus-chrome-0.3.1.zip</code> into a folder</li>
+<li>Unzip <code>eyes-of-argus-chrome-0.4.0.zip</code> into a folder</li>
 <li>Open <code>chrome://extensions</code> (or <code>edge://extensions</code>), turn on <strong>Developer mode</strong></li>
 <li>Click <strong>Load unpacked</strong> and pick the folder</li>
 </ol>
@@ -93,12 +94,13 @@ into <strong>Shared list</strong>. It updates twice a day when online. Your own 
 <h2>Development</h2>
 <pre class="prettyprint source"><code>npm install && (cd server && npm install)
 python build.py      # builds dist/
-npm test             # 30 tests, including a local sync server
+npm test             # 68 tests, including a local sync server
+npm run test:browser # loads the Chrome build into a real Chrome
 npm run lint         # ESLint + Mozilla's add-on linter
 npm run docs         # API reference in docs/api
 </code></pre>
 <p>Architecture, storage keys, messages and file formats: <code>docs/ARCHITECTURE.md</code>.
-Firefox for Android: badges and sync work; marking needs the desktop right-click menu.</p></article>
+Publishing to the Chrome Web Store and Firefox Add-ons: <code>store/PUBLISHING.md</code>. Privacy policy: <code>PRIVACY.md</code>.</p></article>
     </section>
 
 
@@ -536,18 +538,18 @@ last community list always keeps working offline.</li>
     <div class="container-overview">
     
         
-            <div class="description"><p>Content script of The Eyes of Argus (runs on youtube.com, top frame only).</p>
-<p>Two jobs:</p>
+            <div class="description"><p>Content script of The Eyes of Argus (top frame of every supported site).</p>
+<p>Site-specific knowledge lives in <code>platforms.js</code>; this file is generic. Two jobs:</p>
 <ol>
-<li><strong>Show marks.</strong> Every channel link on the page gets a <code>data-argus=&quot;ai pe&quot;</code>
-attribute and its video card a <code>data-argus-card</code> attribute; <code>content.css</code> turns
-those into badges, tinted names and faded cards. Setting attributes is the only DOM
-work, so the cost on YouTube stays tiny.</li>
-<li><strong>Resolve right-clicks.</strong> When a menu item is chosen, work out which channel was
-right-clicked and ask the background to change it (the background is the only
-part that writes marks; see background.js).</li>
+<li><strong>Show marks.</strong> Every account link (or search result) on the page gets a
+<code>data-argus=&quot;ai pe&quot;</code> attribute and its card a <code>data-argus-card</code> attribute;
+<code>content.css</code> turns those into badges, tinted names and faded cards. Setting
+attributes is the only DOM work, so the cost on the page stays tiny.</li>
+<li><strong>Resolve right-clicks.</strong> When a menu item is chosen, work out which account or
+website was right-clicked and ask the background to change it (the background is
+the only part that writes marks; see background.js).</li>
 </ol>
-<p>Where a channel's state comes from, highest priority first:
+<p>Where a key's state comes from, highest priority first:
 your own mark (yes / &quot;not&quot;) → the subscribed shared list → the community list.</p></div>
         
 
@@ -731,6 +733,166 @@ any other <code>await</code>, or browsers refuse them; every handler below keeps
 
 <header>
     
+        <h2>src/platforms.js</h2>
+        
+    
+</header>
+
+<article>
+    <div class="container-overview">
+    
+        
+            <div class="description"><p>Per-site adapters for the content script.</p>
+<p><code>content.js</code> is generic; everything a site needs is described here by one adapter:</p>
+<table>
+<thead>
+<tr>
+<th>field</th>
+<th>meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>platform name</td>
+</tr>
+<tr>
+<td><code>test(host)</code></td>
+<td>does this adapter handle the page's hostname?</td>
+</tr>
+<tr>
+<td><code>owns(key)</code></td>
+<td>is this key shown on this site? (keeps the lookup map small)</td>
+</tr>
+<tr>
+<td><code>linkSel</code></td>
+<td>CSS selector for links that can point at an account / site</td>
+</tr>
+<tr>
+<td><code>keyOf(a)</code></td>
+<td>canonical key for a link, or null</td>
+</tr>
+<tr>
+<td><code>nameOf(a,key)</code></td>
+<td>optional display name (default: the link text)</td>
+</tr>
+<tr>
+<td><code>badgeEl(a)</code></td>
+<td>optional element that carries the badge (default: the link, if text-only)</td>
+</tr>
+<tr>
+<td><code>cardSel</code></td>
+<td>optional selector of the &quot;card&quot; around a post / result (for fading, and right-clicks)</td>
+</tr>
+<tr>
+<td><code>boxSel</code></td>
+<td>optional wider selector used only for right-clicks (default <code>cardSel</code>)</td>
+</tr>
+<tr>
+<td><code>guessFromCard</code></td>
+<td>right-click anywhere in a card marks the card's first account link</td>
+</tr>
+<tr>
+<td><code>ignoreSel</code></td>
+<td>optional: DOM changes inside this are ignored (e.g. the video player)</td>
+</tr>
+<tr>
+<td><code>pageTarget()</code></td>
+<td>optional: the account the current page belongs to <code>{key, name, box?}</code></td>
+</tr>
+<tr>
+<td><code>enrich(r,ctx)</code></td>
+<td>optional: add extra data to a resolved right-click target</td>
+</tr>
+</tbody>
+</table>
+<p>Selectors for third-party sites can go stale when those sites change their markup;
+the worst case is a missing badge or &quot;No account found here&quot;, never a wrong mark:
+every key still has to pass <code>Argus.normalizeKey</code>.</p>
+<p>Exposed as the frozen global <code>ArgusPlatforms</code>.</p></div>
+        
+
+        
+
+
+<dl class="details">
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+    <dt class="tag-source">Source:</dt>
+    <dd class="tag-source"><ul class="dummy"><li>
+        <a href="src_platforms.js.html">src/platforms.js</a>, <a href="src_platforms.js.html#line1">line 1</a>
+    </li></ul></dd>
+    
+
+    
+
+    
+
+    
+</dl>
+
+
+        
+    
+    </div>
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+</article>
+
+</section>
+
+
+
+
+
+
+
+<section>
+
+<header>
+    
         <h2>src/shared.js</h2>
         
     
@@ -831,7 +993,7 @@ Everything is exposed on one frozen global, <code>globalThis.Argus</code>.</p></
 </div>
 
 <nav>
-    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="HttpError.html">HttpError</a></li></ul><h3>Global</h3><ul><li><a href="global.html#A">A</a></li><li><a href="global.html#CACHE_KEY">CACHE_KEY</a></li><li><a href="global.html#CORS_GET">CORS_GET</a></li><li><a href="global.html#DAY">DAY</a></li><li><a href="global.html#FROM_TABS">FROM_TABS</a></li><li><a href="global.html#HANDLERS">HANDLERS</a></li><li><a href="global.html#IMPORT">IMPORT</a></li><li><a href="global.html#MARK">MARK</a></li><li><a href="global.html#MAX_BATCH">MAX_BATCH</a></li><li><a href="global.html#MAX_BODY">MAX_BODY</a></li><li><a href="global.html#MAX_NAME">MAX_NAME</a></li><li><a href="global.html#MENU">MENU</a></li><li><a href="global.html#POW_MAX_BITS">POW_MAX_BITS</a></li><li><a href="global.html#SYNC_CONFIG">SYNC_CONFIG</a></li><li><a href="global.html#SYNC_NOW">SYNC_NOW</a></li><li><a href="global.html#UPDATE_LIST">UPDATE_LIST</a></li><li><a href="global.html#WIPE">WIPE</a></li><li><a href="global.html#allow">allow</a></li><li><a href="global.html#applyMark">applyMark</a></li><li><a href="global.html#buildMenus">buildMenus</a></li><li><a href="global.html#cfg">cfg</a></li><li><a href="global.html#chunks">chunks</a></li><li><a href="global.html#configureSync">configureSync</a></li><li><a href="global.html#dirtyUserChannels">dirtyUserChannels</a></li><li><a href="global.html#ensureIdentity">ensureIdentity</a></li><li><a href="global.html#expandV6">expandV6</a></li><li><a href="global.html#fetchCommunity">fetchCommunity</a></li><li><a href="global.html#flushQueue">flushQueue</a></li><li><a href="global.html#forget">forget</a></li><li><a href="global.html#get">get</a></li><li><a href="global.html#importData">importData</a></li><li><a href="global.html#json">json</a></li><li><a href="global.html#netHash">netHash</a></li><li><a href="global.html#netOf">netOf</a></li><li><a href="global.html#normalizeShared">normalizeShared</a></li><li><a href="global.html#num">num</a></li><li><a href="global.html#originAllowed">originAllowed</a></li><li><a href="global.html#post">post</a></li><li><a href="global.html#queueVotes">queueVotes</a></li><li><a href="global.html#readJson">readJson</a></li><li><a href="global.html#readMark">readMark</a></li><li><a href="global.html#rebuild">rebuild</a></li><li><a href="global.html#register">register</a></li><li><a href="global.html#safeEqual">safeEqual</a></li><li><a href="global.html#scheduleFlush">scheduleFlush</a></li><li><a href="global.html#score">score</a></li><li><a href="global.html#sendPendingForget">sendPendingForget</a></li><li><a href="global.html#serial">serial</a></li><li><a href="global.html#set">set</a></li><li><a href="global.html#setup">setup</a></li><li><a href="global.html#snapshot">snapshot</a></li><li><a href="global.html#solvePow">solvePow</a></li><li><a href="global.html#syncNow">syncNow</a></li><li><a href="global.html#syncOnce">syncOnce</a></li><li><a href="global.html#unqueue">unqueue</a></li><li><a href="global.html#updateShared">updateShared</a></li><li><a href="global.html#userFromSecret">userFromSecret</a></li><li><a href="global.html#votes">votes</a></li><li><a href="global.html#wipe">wipe</a></li></ul>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="HttpError.html">HttpError</a></li></ul><h3>Global</h3><ul><li><a href="global.html#A">A</a></li><li><a href="global.html#CACHE_KEY">CACHE_KEY</a></li><li><a href="global.html#CORS_GET">CORS_GET</a></li><li><a href="global.html#DAY">DAY</a></li><li><a href="global.html#FROM_TABS">FROM_TABS</a></li><li><a href="global.html#HANDLERS">HANDLERS</a></li><li><a href="global.html#IMPORT">IMPORT</a></li><li><a href="global.html#MARK">MARK</a></li><li><a href="global.html#MAX_BATCH">MAX_BATCH</a></li><li><a href="global.html#MAX_BODY">MAX_BODY</a></li><li><a href="global.html#MAX_NAME">MAX_NAME</a></li><li><a href="global.html#MENU">MENU</a></li><li><a href="global.html#POW_MAX_BITS">POW_MAX_BITS</a></li><li><a href="global.html#SITES">SITES</a></li><li><a href="global.html#SYNC_CONFIG">SYNC_CONFIG</a></li><li><a href="global.html#SYNC_NOW">SYNC_NOW</a></li><li><a href="global.html#UPDATE_LIST">UPDATE_LIST</a></li><li><a href="global.html#WIPE">WIPE</a></li><li><a href="global.html#allow">allow</a></li><li><a href="global.html#applyMark">applyMark</a></li><li><a href="global.html#buildMenus">buildMenus</a></li><li><a href="global.html#cfg">cfg</a></li><li><a href="global.html#chunks">chunks</a></li><li><a href="global.html#configureSync">configureSync</a></li><li><a href="global.html#dirtyUserChannels">dirtyUserChannels</a></li><li><a href="global.html#ensureIdentity">ensureIdentity</a></li><li><a href="global.html#expandV6">expandV6</a></li><li><a href="global.html#fetchCommunity">fetchCommunity</a></li><li><a href="global.html#flushQueue">flushQueue</a></li><li><a href="global.html#forHost">forHost</a></li><li><a href="global.html#forget">forget</a></li><li><a href="global.html#get">get</a></li><li><a href="global.html#importData">importData</a></li><li><a href="global.html#json">json</a></li><li><a href="global.html#netHash">netHash</a></li><li><a href="global.html#netOf">netOf</a></li><li><a href="global.html#normalizeShared">normalizeShared</a></li><li><a href="global.html#num">num</a></li><li><a href="global.html#originAllowed">originAllowed</a></li><li><a href="global.html#post">post</a></li><li><a href="global.html#queueVotes">queueVotes</a></li><li><a href="global.html#readJson">readJson</a></li><li><a href="global.html#readMark">readMark</a></li><li><a href="global.html#rebuild">rebuild</a></li><li><a href="global.html#register">register</a></li><li><a href="global.html#safeEqual">safeEqual</a></li><li><a href="global.html#scheduleFlush">scheduleFlush</a></li><li><a href="global.html#score">score</a></li><li><a href="global.html#sendPendingForget">sendPendingForget</a></li><li><a href="global.html#serial">serial</a></li><li><a href="global.html#set">set</a></li><li><a href="global.html#setup">setup</a></li><li><a href="global.html#snapshot">snapshot</a></li><li><a href="global.html#solvePow">solvePow</a></li><li><a href="global.html#syncNow">syncNow</a></li><li><a href="global.html#syncOnce">syncOnce</a></li><li><a href="global.html#unqueue">unqueue</a></li><li><a href="global.html#updateShared">updateShared</a></li><li><a href="global.html#userFromSecret">userFromSecret</a></li><li><a href="global.html#votes">votes</a></li><li><a href="global.html#wipe">wipe</a></li></ul>
 </nav>
 
 <br class="clear">

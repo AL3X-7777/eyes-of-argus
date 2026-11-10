@@ -26,14 +26,15 @@ test('Google: a result is marked by its website; the badge sits on the title', a
   assert.equal(s.data.marks['site:google.com'], undefined, 'links back to the search engine are not results');
 });
 
-test('Google: YouTube marks do not leak onto search pages (and vice versa)', async () => {
-  const s = fakeStorage({ marks: { '@nileblue': { ai: 1, pe: 0 }, 'site:youtube.com': { ai: 0, pe: 1 } } });
+test('Google: a result for a channel or profile uses that account\'s mark, never the whole platform', async () => {
+  const s = fakeStorage({ marks: { '@nileblue': { ai: 1, pe: 0 }, 'site:youtube.com': { ai: 0, pe: 1 }, 'site:example.com': { ai: 1, pe: 0 } } });
   const g = page('<div class="g"><a href="https://www.youtube.com/@NileBlue" id="a"><h3 id="h">NileBlue</h3></a></div>', s, 'https://www.google.de/search?q=x');
   await wait(300);
-  assert.equal(g.$('h').dataset.argus, 'pe', 'the website mark shows, not the channel mark');
-  const y = page('<ytd-rich-item-renderer><a href="/@NileBlue" id="n">NileBlue</a></ytd-rich-item-renderer>', s);
+  assert.equal(g.$('h').dataset.argus, 'ai', 'the channel mark shows, not a mark for all of YouTube');
+  const y = page('<ytd-rich-item-renderer><a href="/@NileBlue" id="n">NileBlue</a><a href="https://example.com/" id="e">example</a></ytd-rich-item-renderer>', s);
   await wait(300);
   assert.equal(y.$('n').dataset.argus, 'ai');
+  assert.equal(y.$('e').dataset.argus, undefined, 'website marks stay on search pages');
 });
 
 test('X: author links are badged, reserved paths ignored, profile page fallback', async () => {

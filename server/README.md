@@ -22,6 +22,7 @@ Cloudflare's free plan for a long time.
 | IPv6 address hopping | networks are grouped by /56 |
 | Huge requests | bodies over 64 KB are refused |
 | Votes lost in races or crashes | `rev` counter, snapshot written before dirty flags are cleared, ETag-guarded writes |
+| A voter gives a channel a misleading name | names sent by voters are stored but never published in the snapshot |
 | Wrong marks | your admin `overrides` table can always hide or force a flag |
 
 Not covered: a determined attacker with many networks over many days. For that, watch the
