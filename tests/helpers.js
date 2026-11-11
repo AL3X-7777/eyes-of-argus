@@ -12,7 +12,7 @@ const SRC = path.join(ROOT, 'src');
 /** Scripts in the order the manifest loads them (kept in sync with build.py). */
 const present = list => list.filter(f => fs.existsSync(path.join(SRC, f)));
 const CONTENT_SCRIPTS = present(['shared.js', 'platforms.js', 'content.js']);
-const BACKGROUND_SCRIPTS = present(['shared.js', 'background.js']);
+const BACKGROUND_SCRIPTS = present(['shared.js', 'platforms.js', 'background.js']);
 
 const clone = x => (x === undefined ? undefined : JSON.parse(JSON.stringify(x)));
 const wait = ms => new Promise(r => setTimeout(r, ms));
@@ -66,7 +66,13 @@ function fakeApi(storage) {
     action: { onClicked: event() },
     alarms: { create() {}, onAlarm: event() },
     tabs: { create() {}, sendMessage: async () => {} },
-    permissions: { request: async () => true },
+    permissions: { request: async () => true, contains: async () => true },
+    scripting: {
+      registered: [],
+      async getRegisteredContentScripts() { return this.registered; },
+      async unregisterContentScripts() { this.registered = []; },
+      async registerContentScripts(list) { this.registered = list; },
+    },
   };
 }
 

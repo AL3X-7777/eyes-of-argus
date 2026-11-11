@@ -1,16 +1,16 @@
-# The Eyes of Argus
+# Eyes of Argus
 
 A browser extension that marks YouTube channels, social media accounts and websites that use AI and/or are owned by private equity.
 
 Works on YouTube, X, Reddit, Instagram, TikTok, Twitch and Facebook, and on Google, Bing and DuckDuckGo results (a result marks its whole website).
-Right-click a channel name or video → **The Eyes of Argus** → mark it. Works offline, with no account.
+Right-click a channel name or video → **Eyes of Argus** → mark it. Works offline, with no account.
 Optional community sync through a tiny self-hosted server (see `server/README.md`).
 
 ## Install
 
 **Firefox (for testing)**
 1. Open `about:debugging#/runtime/this-firefox`
-2. Click **Load Temporary Add-on…** and pick `eyes-of-argus-firefox-0.4.0.zip`
+2. Click **Load Temporary Add-on…** and pick `eyes-of-argus-firefox-0.5.0.zip`
 3. Reload any open YouTube tabs
 
 Temporary add-ons disappear when Firefox restarts. To keep it installed, upload the zip to
@@ -18,12 +18,12 @@ https://addons.mozilla.org/developers/ as **"On your own"** (unlisted). Signing 
 get a signed `.xpi` you can install permanently.
 
 **Chrome / Edge / Brave / Opera**
-1. Unzip `eyes-of-argus-chrome-0.4.0.zip` into a folder
+1. Unzip `eyes-of-argus-chrome-0.5.0.zip` into a folder
 2. Open `chrome://extensions` (or `edge://extensions`), turn on **Developer mode**
 3. Click **Load unpacked** and pick the folder
 
 ## Using it
-- Right-click a channel name, a video thumbnail, or anywhere on a watch/channel page
+- Right-click any link on any website, a channel name, a video thumbnail, a search result, or an empty spot on a page
 - **Mark as AI channel** / **Mark as private-equity owned** (a channel can be both)
 - **Not AI** / **Not PE-owned**: you disagree. This hides community/shared marks for you and votes against them
 - **Clear**: back to no opinion
@@ -55,7 +55,7 @@ Edit files in `src/`, then run `python build.py`. Output goes to `dist/`.
 ```
 npm install && (cd server && npm install)
 python build.py      # builds dist/
-npm test             # 68 tests, including a local sync server
+npm test             # 72 tests, including a local sync server
 npm run test:browser # loads the Chrome build into a real Chrome
 npm run lint         # ESLint + Mozilla's add-on linter
 npm run docs         # API reference in docs/api

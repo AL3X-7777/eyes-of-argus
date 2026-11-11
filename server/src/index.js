@@ -1,5 +1,5 @@
 /**
- * @file The Eyes of Argus sync server (Cloudflare Worker + D1 + R2).
+ * @file Eyes of Argus sync server (Cloudflare Worker + D1 + KV).
  *
  * | Route                | What it does |
  * |----------------------|--------------|
@@ -8,7 +8,8 @@
  * | `POST /register`     | `{secret, nonce}` → `{id}`: anonymous install, proof of work |
  * | `POST /votes`        | `{secret, votes:[{k,f,v,name}], replace?}` |
  * | `POST /forget`       | `{secret}`: delete all of this install's votes and the install |
- * | `POST /admin/rebuild`| `Authorization: Bearer <ADMIN_TOKEN>`: recount everything |
+ * | `GET  /admin`        | moderation dashboard (see admin.js); its API needs `Authorization: Bearer <ADMIN_TOKEN>` |
+ * | `POST /admin/rebuild`| recount everything |
  * | cron (15 min)        | recount changed channels, patch the snapshot |
  *
  * Abuse resistance (see server/README.md, "Threat model"): POSTs only from extensions
@@ -16,11 +17,14 @@
  * /56); new installs carry no weight for their first days; at most `MAX_PER_NET`
  * votes per channel count from installs registered on the same network.
  */
-import { A, DAY, cfg, netOf, originAllowed, readJson, safeEqual, chunks, score } from './lib.js';
+import { A, DAY, cfg, netOf, originAllowed, readJson, chunks, score, json } from './lib.js';
+import { admin } from './admin.js';
 
 const SNAPSHOT = 'snapshot.json';
 /** Fixed edge-cache key for the snapshot, so a rebuild can invalidate it. */
 const CACHE_KEY = 'https://argus.cache/snapshot.json';
+/** How long the edge cache keeps the list. Each cache miss costs one KV read (free plan: 100,000 a day). */
+const CACHE_SECONDS = 600;
 
 /** CORS only for reading; POST routes are for the extension, which needs no CORS. */
 const CORS_GET = {
@@ -29,14 +33,6 @@ const CORS_GET = {
   'access-control-allow-headers': 'if-none-match',
   'access-control-expose-headers': 'etag',
 };
-
-/**
- * @param {any} data
- * @param {number} [status]
- * @param {Object} [headers]
- */
-const json = (data, status = 200, headers = {}) =>
-  new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json', ...headers } });
 
 const today = () => Math.floor(Date.now() / DAY);
 
@@ -168,17 +164,17 @@ async function forget(_req, env, body) {
   return json({ ok: true, deleted: true });
 }
 
-/** `GET /snapshot.json`: edge cache in front of R2, conditional requests → 304. */
+/** `GET /snapshot.json`: edge cache in front of KV, conditional requests → 304. */
 async function snapshot(req, env, ctx) {
   const inm = req.headers.get('if-none-match');
   const cacheKey = new Request(CACHE_KEY);
   const cache = globalThis.caches?.default;
   let res = cache && (await cache.match(cacheKey));
   if (!res) {
-    const obj = await env.BUCKET.get(SNAPSHOT);
-    if (!obj) return json({ v: 1, generated: 0, c: {} }, 200, CORS_GET);
-    res = new Response(obj.body, {
-      headers: { 'content-type': 'application/json', etag: obj.httpEtag, 'cache-control': 'public, max-age=60', ...CORS_GET },
+    const { value, metadata } = await env.KV.getWithMetadata(SNAPSHOT, 'text');
+    if (value == null) return json({ v: 1, generated: 0, c: {} }, 200, CORS_GET);
+    res = new Response(value, {
+      headers: { 'content-type': 'application/json', etag: metadata?.etag || '"g0"', 'cache-control': `public, max-age=${CACHE_SECONDS}`, ...CORS_GET },
     });
     if (cache) ctx.waitUntil(cache.put(cacheKey, res.clone()));
   }
@@ -191,38 +187,42 @@ async function snapshot(req, env, ctx) {
 // ---------------------------------------------------------------------------
 
 /**
- * Recounts channels marked dirty and patches the snapshot.
+ * Recounts channels that need it and republishes the community list.
  *
- * Safe against crashes and concurrent votes:
- * - at most `MAX_PER_RUN` channels per run (stays under the free plan's 50 queries per
- *   invocation: 2 + 2 per 90-channel chunk);
- * - the snapshot is written to R2 **before** any `dirty` flag is cleared, with an ETag
- *   condition so two rebuilds can't overwrite each other;
- * - `dirty` is only cleared if `rev` is unchanged, so a vote that arrives during the
- *   recount keeps its channel dirty for the next run.
+ * The database is the source of truth: each channel row stores its published entry
+ * (`entry`, NULL when not shown). The list in KV is only a copy of those rows, written
+ * whenever one of them changed, so a crash or a stale KV read can't lose anything:
+ * - at most `MAX_PER_RUN` channels per run (free plan: 50 database queries per run);
+ * - a channel's `dirty` flag is only cleared if its `rev` is unchanged, so a vote that
+ *   arrives during the recount keeps the channel queued;
+ * - a `stale` marker is set together with the row updates and cleared only after the
+ *   list was written, so an interrupted run is finished by the next one.
  *
  * @param {Object} env
- * @returns {Promise<{changed: number, total: number, conflict: boolean}>}
+ * @returns {Promise<{changed: number, total: number}>}
  */
 async function rebuild(env) {
   const c = cfg(env);
   const now = Date.now();
-  await env.DB.prepare('DELETE FROM limits WHERE day < ?').bind(today()).run();
-  const { results: dirty } = await env.DB.prepare(
-    'SELECT key, rev FROM channels WHERE dirty = 1 OR (recheck_at > 0 AND recheck_at <= ?) ORDER BY dirty DESC, updated_at LIMIT ?'
-  ).bind(now, c.maxPerRun).all();
-  if (!dirty.length) return { changed: 0 };
+  // Yesterday's rate-limit counters: cleaned once a day (the first run after midnight UTC)
+  if (now % DAY < 16 * 60e3) await env.DB.prepare('DELETE FROM limits WHERE day < ?').bind(today()).run();
 
-  const obj = await env.BUCKET.get(SNAPSHOT);
-  let snap = { v: 1, generated: 0, c: {} };
-  if (obj) { try { snap = await obj.json(); } catch { /* corrupt: start fresh */ } }
-  const before = JSON.stringify(snap.c);
+  // Two index lookups (never a table scan): changed channels first, then channels whose
+  // warm-up votes have matured.
+  let { results: todo } = await env.DB.prepare('SELECT key, rev FROM channels WHERE dirty = 1 LIMIT ?').bind(c.maxPerRun).all();
+  if (todo.length < c.maxPerRun) {
+    const { results: due } = await env.DB.prepare(
+      'SELECT key, rev FROM channels WHERE dirty = 0 AND recheck_at > 0 AND recheck_at <= ? LIMIT ?'
+    ).bind(now, c.maxPerRun - todo.length).all();
+    todo = todo.concat(due);
+  }
 
-  const updates = [];
-  for (const part of chunks(dirty, 90)) {
+  let listChanged = false;
+  for (const part of chunks(todo, 90)) {
     const keys = part.map(r => r.key);
     const ph = keys.map((_, i) => `?${i + 3}`).join(',');
-    const [tallies, overrides, names] = await env.DB.batch([
+    const plain = keys.map(() => '?').join(',');
+    const [tallies, overrides, rows] = await env.DB.batch([
       env.DB.prepare(
         `WITH ranked AS (
            SELECT v.channel_key AS k, v.flag AS f, v.value AS val, u.created_at AS born,
@@ -235,46 +235,56 @@ async function rebuild(env) {
                 SUM(CASE WHEN val < 0 AND rn <= ?2 THEN w ELSE 0 END) AS down
          FROM ranked GROUP BY k, f`
       ).bind(now - c.warmupMs, c.maxPerNet, ...keys),
-      env.DB.prepare(`SELECT key, ai, pe FROM overrides WHERE key IN (${keys.map(() => '?').join(',')})`).bind(...keys),
-      env.DB.prepare(`SELECT key, name FROM channels WHERE key IN (${keys.map(() => '?').join(',')})`).bind(...keys),
+      env.DB.prepare(`SELECT key, ai, pe FROM overrides WHERE key IN (${plain})`).bind(...keys),
+      env.DB.prepare(`SELECT key, entry FROM channels WHERE key IN (${plain})`).bind(...keys),
     ]);
     const t = {};
     for (const r of tallies.results) (t[r.k] ||= {})[r.f] = r;
     const ov = Object.fromEntries(overrides.results.map(r => [r.key, r]));
-    const nm = Object.fromEntries(names.results.map(r => [r.key, r.name]));
+    const old = Object.fromEntries(rows.results.map(r => [r.key, r.entry]));
 
+    const stmts = [];
     for (const { key, rev } of part) {
-      const s = score(t[key], ov[key], nm[key], c);
-      if (s.entry) snap.c[key] = s.entry; else delete snap.c[key];
+      const s = score(t[key], ov[key], c);
+      const entry = s.entry ? JSON.stringify(s.entry) : null;
+      if (entry !== (old[key] ?? null)) listChanged = true;
       // Votes from installs still in their warm-up count later: note when the first of
       // them matures, so the channel is recounted then (without staying in the queue).
       const born = A.FLAGS.map(f => t[key]?.[f]?.young).filter(Boolean);
       const recheck = born.length ? Math.min(...born) + c.warmupMs + 1 : 0;
-      // Names are sent by voters and are not verified, so they are never published.
-      if (s.entry) snap.c[key][4] = '';
-      updates.push({ key, rev, raw: s.raw, recheck, remove: s.total === 0 && !ov[key] });
+      stmts.push(s.total === 0 && !ov[key]
+        ? env.DB.prepare('DELETE FROM channels WHERE key = ? AND rev = ?').bind(key, rev)
+        : env.DB.prepare(
+          `UPDATE channels SET ai_pct = ?, ai_n = ?, pe_pct = ?, pe_n = ?, entry = ?, dirty = 0, recheck_at = ?, updated_at = ?
+           WHERE key = ? AND rev = ?`
+        ).bind(s.raw.ai.pct, s.raw.ai.n, s.raw.pe.pct, s.raw.pe.n, entry, recheck, now, key, rev));
     }
+    if (listChanged) stmts.push(env.DB.prepare("INSERT OR REPLACE INTO meta (k, v) VALUES ('stale', 1)"));
+    await env.DB.batch(stmts);
   }
 
-  if (JSON.stringify(snap.c) !== before || !obj) {
-    snap.generated = now;
-    snap.min = { votes: c.minVotes, agree: c.minAgree };
-    const put = await env.BUCKET.put(SNAPSHOT, JSON.stringify(snap), {
-      httpMetadata: { contentType: 'application/json' },
-      ...(obj ? { onlyIf: { etagMatches: obj.etag } } : {}),
-    });
-    if (!put) return { changed: 0, conflict: true }; // another rebuild won; dirty flags stay set
-    await globalThis.caches?.default.delete(new Request(CACHE_KEY));
-  }
+  const stale = listChanged || (await env.DB.prepare("SELECT v FROM meta WHERE k = 'stale'").first())?.v === 1;
+  let total;
+  if (stale) total = await publish(env, c, now);
+  return { changed: todo.length, ...(total === undefined ? {} : { total }) };
+}
 
-  for (const part of chunks(updates, 90)) {
-    await env.DB.batch(part.map(u => (u.remove
-      ? env.DB.prepare('DELETE FROM channels WHERE key = ? AND rev = ?').bind(u.key, u.rev)
-      : env.DB.prepare(
-        'UPDATE channels SET ai_pct = ?, ai_n = ?, pe_pct = ?, pe_n = ?, dirty = 0, recheck_at = ?, updated_at = ? WHERE key = ? AND rev = ?'
-      ).bind(u.raw.ai.pct, u.raw.ai.n, u.raw.pe.pct, u.raw.pe.n, u.recheck, now, u.key, u.rev))));
-  }
-  return { changed: dirty.length, total: Object.keys(snap.c).length };
+/**
+ * Writes the community list to KV from the channel rows. The JSON is assembled from the
+ * stored entry strings without re-parsing them (CPU time is limited to 10 ms on the free plan).
+ * @param {Object} env
+ * @param {Object} c config
+ * @param {number} now
+ * @returns {Promise<number>} number of channels in the list
+ */
+async function publish(env, c, now) {
+  const { results } = await env.DB.prepare('SELECT key, entry FROM channels WHERE entry IS NOT NULL').all();
+  const body = `{"v":1,"generated":${now},"min":{"votes":${c.minVotes},"agree":${c.minAgree}},"c":{${
+    results.map(r => `${JSON.stringify(r.key)}:${r.entry}`).join(',')}}}`;
+  await env.KV.put(SNAPSHOT, body, { metadata: { etag: `"g${now}"` } });
+  await env.DB.prepare("INSERT OR REPLACE INTO meta (k, v) VALUES ('stale', 0)").run();
+  await globalThis.caches?.default.delete(new Request(CACHE_KEY));
+  return results.length;
 }
 
 // ---------------------------------------------------------------------------
@@ -294,15 +304,9 @@ export default {
         const c = cfg(env);
         return json({ powBits: c.powBits, minVotes: c.minVotes, minAgree: c.minAgree, maxBatch: A.LIMITS.MAX_BATCH }, 200, CORS_GET);
       }
+      if (pathname === '/admin' || pathname.startsWith('/admin/')) return await admin(req, env, pathname, rebuild);
       if (req.method !== 'POST') return json({ error: 'not found' }, 404);
       if (!originAllowed(req)) return json({ error: 'forbidden origin' }, 403);
-
-      if (pathname === '/admin/rebuild') {
-        const auth = req.headers.get('authorization') || '';
-        if (!env.ADMIN_TOKEN || !(await safeEqual(auth, `Bearer ${env.ADMIN_TOKEN}`))) return json({ error: 'forbidden' }, 403);
-        await env.DB.prepare('UPDATE channels SET dirty = 1, rev = rev + 1').run();
-        return json(await rebuild(env));
-      }
       const handler = POST_ROUTES[pathname];
       if (!handler) return json({ error: 'not found' }, 404);
       const parsed = await readJson(req);

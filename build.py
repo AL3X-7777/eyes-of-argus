@@ -1,4 +1,4 @@
-"""Build The Eyes of Argus for Firefox and Chromium browsers.
+"""Build Eyes of Argus for Firefox and Chromium browsers.
 
 Usage:  python build.py
 Output: dist/firefox/, dist/chrome/ and a .zip of each.
@@ -36,13 +36,13 @@ ICONS = {s: f"icons/icon{s}.png" for s in (16, 32, 48, 128)}
 
 BASE = {
     "manifest_version": 3,
-    "name": "The Eyes of Argus",
+    "name": "Eyes of Argus",
     "version": VERSION,
     "description": "Mark YouTube channels, social accounts and search results that use AI or are owned by private equity. Works offline.",
     "icons": ICONS,
-    "permissions": ["contextMenus", "storage", "alarms", "unlimitedStorage"],
+    "permissions": ["contextMenus", "storage", "alarms", "unlimitedStorage", "scripting"],
     "optional_host_permissions": ["https://*/*", "http://localhost/*", "http://127.0.0.1/*"],
-    "action": {"default_title": "The Eyes of Argus", "default_icon": ICONS},
+    "action": {"default_title": "Eyes of Argus", "default_icon": ICONS},
     "options_ui": {"page": "options.html", "open_in_tab": True},
     "content_scripts": [{
         "matches": SITES,
@@ -54,7 +54,7 @@ BASE = {
 
 TARGETS = {
     "firefox": {
-        "background": {"scripts": ["shared.js", "background.js"]},
+        "background": {"scripts": ["shared.js", "platforms.js", "background.js"]},
         "host_permissions": SITES,  # Firefox only runs content scripts on hosts the user has granted
         "browser_specific_settings": {"gecko": {
             "id": "eyes-of-argus@argus.local",
@@ -63,7 +63,7 @@ TARGETS = {
         }},  # desktop only: marking needs the right-click menu, which Firefox for Android lacks
     },
     "chrome": {
-        "background": {"service_worker": "background.js"},  # loads shared.js via importScripts
+        "background": {"service_worker": "background.js"},  # loads shared.js and platforms.js via importScripts
         "minimum_chrome_version": "111",
         # no host_permissions: Chrome runs declared content scripts without them, and
         # nothing else here needs access to these sites

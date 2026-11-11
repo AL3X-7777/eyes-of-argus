@@ -1,5 +1,5 @@
 /**
- * @file Content script of The Eyes of Argus (top frame of every supported site).
+ * @file Content script of Eyes of Argus (top frame of every supported site).
  *
  * Site-specific knowledge lives in `platforms.js`; this file is generic. Two jobs:
  * 1. **Show marks.** Every account link (or search result) on the page gets a
@@ -20,9 +20,12 @@
   const A = globalThis.Argus;
   const { FLAGS, MSG } = A;
 
-  /** Adapter for this site (see platforms.js); pages without one are left alone. */
-  const site = globalThis.ArgusPlatforms.forHost(location.hostname);
-  if (!site) return;
+  if (globalThis.__argusLoaded) return; // never run twice in one page
+  globalThis.__argusLoaded = true;
+
+  const P = globalThis.ArgusPlatforms;
+  /** Adapter for this site (see platforms.js); unknown sites get the generic one. */
+  const site = P.forHost(location.hostname);
   const boxSel = site.boxSel || site.cardSel || null;
 
   /** A right-click older than this is not trusted for a menu action. */
@@ -233,8 +236,12 @@
    */
   function resolve(el) {
     const box = boxSel ? closestDeep(el, boxSel) : null;
-    const direct = fromAnchor(closestDeep(el, 'a[href]'));
+    const link = closestDeep(el, 'a[href]');
+    const direct = fromAnchor(link);
     if (direct) return finish(direct, box);
+    // Any other link that leaves this site can be marked by where it points
+    const away = link && externalTarget(link);
+    if (away) return away;
 
     if (box) {
       if (site.guessFromCard) {
@@ -247,6 +254,19 @@
     }
     const page = site.pageTarget && site.pageTarget();
     return page ? finish({ key: page.key, name: page.name }, page.box || null) : null;
+  }
+
+  /**
+   * Target for a link that leaves the current site: the account or website it points at.
+   * @param {HTMLAnchorElement} a
+   * @returns {?{key: string, name: string}}
+   */
+  function externalTarget(a) {
+    let u;
+    try { u = new URL(a.href); } catch { return null; }
+    if (u.hostname === location.hostname) return null;
+    const key = P.keyForUrl(u.href);
+    return key ? { key, name: A.nameForKey(key) } : null;
   }
 
   /**
@@ -265,14 +285,7 @@
     return r;
   }
 
-  /** Menu action → flag changes and the confirmation text. */
-  const ACTIONS = {
-    ai:    { changes: { ai: 1 },        msg: 'marked as AI' },
-    pe:    { changes: { pe: 1 },        msg: 'marked as private-equity owned' },
-    notai: { changes: { ai: -1 },       msg: 'marked as not AI' },
-    notpe: { changes: { pe: -1 },       msg: 'marked as not PE-owned' },
-    clear: { changes: { ai: 0, pe: 0 }, msg: 'cleared' },
-  };
+  const { ACTIONS } = A;
 
   /**
    * Handles a menu click forwarded by the background.
@@ -284,7 +297,7 @@
     const target = lastTarget && Date.now() - lastTarget.at < TARGET_MAX_AGE_MS ? lastTarget.el : null;
     lastTarget = null; // one right-click, one action
     const t = target && target.nodeType === 1 ? resolve(target) : target && target.parentElement ? resolve(target.parentElement) : null;
-    if (!t) { toast('Nothing to mark here. Right-click an account name, a post or a search result', true); return; }
+    if (!t) { toast('Nothing to mark here. Right-click a link, an account name, a post or a search result', true); return; }
     try {
       const res = await api.runtime.sendMessage({ type: MSG.MARK, key: t.key, name: t.name, uc: t.uc, changes: a.changes });
       if (res?.ok) toast(`${t.name} ${a.msg}`);
@@ -294,8 +307,12 @@
     }
   }
 
-  api.runtime.onMessage.addListener(msg => {
-    if (msg?.type === MSG.MENU) onMenu(msg.action);
+  api.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+    if (msg?.type !== MSG.MENU) return;
+    // tells the background this page handles the click itself (pages without this
+    // script are handled by the background from the link address)
+    if (typeof sendResponse === 'function') sendResponse({ handled: true });
+    onMenu(msg.action);
   });
 
   // ---------------------------------------------------------------------------

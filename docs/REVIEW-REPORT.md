@@ -1,4 +1,4 @@
-# Code review report: The Eyes of Argus v0.2.0 → v0.3.0
+# Code review report: Eyes of Argus v0.2.0 → v0.3.0
 
 ## How the review worked
 1. An independent review agent read the whole project (it changed nothing) and scored it out of 100
@@ -137,3 +137,20 @@ pages, the right-click path, and no access for page scripts.
   Instagram, TikTok, Twitch, Facebook and the search engines have not been checked against the live sites.
 - Firefox in a real browser (only Mozilla's linter and the simulated tests).
 - A vote-stuffing attacker with many networks over several days (see the threat model).
+
+---
+
+# v0.5.0 changes
+
+- **Mark any link on any website** from the right-click menu; optional "Show badges on every website".
+- **Both marks:** names are shown half purple, half amber, with a split badge.
+- **Renamed** to "Eyes of Argus".
+- **Server storage moved from R2 to D1 + KV**, so nothing the server uses can bill on the free plan.
+  The channel rows are now the source of truth and the published list is rebuilt from them.
+- **Recount queries no longer scan whole tables** (they would have used up the daily row-read
+  allowance at around 50,000 channels); the rate-limit clean-up runs once a day instead of every run.
+- **Moderation dashboard** at `/admin` on the sync server.
+- Limits and costs re-checked against Cloudflare's documentation; see `server/README.md`.
+
+72 tests and the real-Chrome smoke test pass. Not verified: Cloudflare's CPU limit (local testing
+does not enforce it), live sites, and Firefox in a real browser.

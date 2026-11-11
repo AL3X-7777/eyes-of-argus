@@ -299,6 +299,24 @@
   /** Platforms whose pages belong to accounts rather than to "the website". */
   const ACCOUNT_SITES = [youtube, x, reddit, instagram, tiktok, twitch, facebook];
 
+  /** Link shorteners and redirectors: the link says nothing about where it leads. */
+  const SHORTENERS = new Set(['t.co', 'bit.ly', 'tinyurl.com', 'goo.gl', 'lnkd.in', 'youtu.be', 'ow.ly', 'buff.ly', 'is.gd', 'rb.gy']);
+
+  /**
+   * The key any web address stands for: the account, when it points at a supported
+   * platform (never the platform as a whole), otherwise the website.
+   * @param {string} url absolute URL
+   * @returns {string|null} e.g. `"x:nasa"`, `"@nileblue"`, `"site:example.com"`
+   */
+  function keyForUrl(url) {
+    let u;
+    try { u = new URL(url); } catch { return null; }
+    if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;
+    if (SHORTENERS.has(u.hostname.replace(/^www\./, ''))) return null;
+    for (const p of ACCOUNT_SITES) if (p.domainRe.test(u.hostname)) return p.fromUrl(u);
+    return A.siteKey(u.href);
+  }
+
   /**
    * The real destination of a search-result link, unwrapping the engines' redirect links.
    * Redirects are only unwrapped for links on the engine's own host, so a look-alike
@@ -339,15 +357,11 @@
       guessFromCard: true,
       badgeEl: o.badgeEl,
       keyOf(a) {
-        const dest = destination(a, o);
-        let u;
-        try { u = new URL(dest); } catch { return null; }
-        for (const p of ACCOUNT_SITES) if (p.domainRe.test(u.hostname)) return p.fromUrl(u);
-        const key = A.siteKey(u.href);
+        const key = keyForUrl(destination(a, o));
         // links back to the results page itself are not results
-        return key && idOf(key) !== root.location.hostname.replace(/^www\./, '') ? key : null;
+        return key && key !== 'site:' + root.location.hostname.replace(/^www\./, '') ? key : null;
       },
-      nameOf: (_a, key) => (key.startsWith('site:') ? idOf(key) : key),
+      nameOf: (_a, key) => A.nameForKey(key),
     };
   }
 
@@ -373,14 +387,43 @@
     cardSel: 'article, .result',
   });
 
+  // ---------------------------------------------------------------------------
+  // Any other website (only when the user turned on "badges on every website")
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Fallback adapter: links that leave the current site are keyed by where they point.
+   * Links within the site are left alone, so a marked site doesn't badge its own menus.
+   */
+  const generic = {
+    id: 'generic',
+    test: () => true,
+    owns: () => true,
+    linkSel: 'a[href^="http"], a[href^="//"]',
+    guessFromCard: false,
+    keyOf(a) {
+      const href = a.href;
+      if (typeof href !== 'string' || !href.startsWith('http')) return null;
+      const key = keyForUrl(href);
+      return key && key !== keyForUrl(root.location.href) ? key : null;
+    },
+    nameOf: (_a, key) => A.nameForKey(key),
+    /** Right-click on an empty spot: the website (or account) the page itself belongs to. */
+    pageTarget() {
+      const key = keyForUrl(root.location.href);
+      return key ? { key, name: A.nameForKey(key) } : null;
+    },
+  };
+
   const list = Object.freeze([youtube, x, reddit, instagram, tiktok, twitch, facebook, google, bing, duckduckgo]);
 
   root.ArgusPlatforms = Object.freeze({
     list,
+    keyForUrl,
     /**
      * @param {string} host page hostname
-     * @returns {Object|null} the adapter for that site
+     * @returns {Object} the adapter for that site; the generic one for any other site
      */
-    forHost: host => list.find(p => p.test(host)) || null,
+    forHost: host => list.find(p => p.test(host)) || generic,
   });
 })(globalThis);

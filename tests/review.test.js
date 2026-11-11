@@ -25,8 +25,8 @@ test('F19/F27: IPv6 grouped by /56; override bits in community entries', async (
   assert.notEqual(netOf('2001:db8:1:2300::1'), netOf('2001:db8:1:2200::1'));
   assert.equal(netOf('::ffff:1.2.3.4'), '1.2.3.4');
   const c = { minVotes: 15, minAgree: 70 };
-  assert.deepEqual(score({}, { ai: 1, pe: null }, 'X', c).entry, [100, 0, 0, 0, 'X', 1]);
-  assert.equal(score({ ai: { up: 20, down: 0, n: 20 } }, { ai: 0 }, 'X', c).entry, null);
+  assert.deepEqual(score({}, { ai: 1, pe: null }, c).entry, [100, 0, 0, 0, '', 1]);
+  assert.equal(score({ ai: { up: 20, down: 0, n: 20 } }, { ai: 0 }, c).entry, null);
 });
 
 test('F7: badge and card tag are removed when YouTube reuses a link for a video', async () => {

@@ -147,3 +147,31 @@ test('N1: votes from new installs are counted once their warm-up ends, without n
   await recount();
   assert.deepEqual((await snapshot())['@warmup'], [100, 2, 0, 0, '']);
 });
+
+test('admin dashboard: page is served safely; API needs the token; hide, auto and delete votes work', async () => {
+  const pageRes = await fetch(srv.url + '/admin');
+  assert.equal(pageRes.status, 200);
+  assert.match(pageRes.headers.get('content-security-policy'), /default-src 'none'/);
+  assert.equal(pageRes.headers.get('x-frame-options'), 'DENY');
+  const admin = { authorization: 'Bearer test-admin' };
+  assert.equal((await fetch(srv.url + '/admin/api/channels')).status, 403);
+  assert.equal((await post('/admin/api/override', { key: '@x', ai: 0 }, { authorization: 'Bearer wrong' })).status, 403);
+  assert.equal((await post('/admin/api/override', { key: '@x', ai: 0 }, { ...admin, origin: 'https://evil.example' })).status, 403);
+  assert.equal((await post('/admin/api/override', { key: 'not a key', ai: 0 }, admin)).status, 400);
+
+  const a = await newUser(), b = await newUser();
+  srv.sql('UPDATE users SET created_at = 0');
+  for (const s of [a, b]) await post('/votes', { secret: s, votes: [{ k: 'site:moderated.example', f: 'ai', v: 1 }] });
+  await recount();
+  assert.ok((await snapshot())['site:moderated.example']);
+  const listed = await (await fetch(srv.url + '/admin/api/channels?q=moderated&shown=1', { headers: admin })).json();
+  assert.equal(listed.channels[0].key, 'site:moderated.example');
+  assert.equal(listed.channels[0].ai.shown, true);
+
+  assert.equal((await post('/admin/api/override', { key: 'site:moderated.example', ai: 0, pe: null }, admin)).status, 200);
+  assert.equal((await snapshot())['site:moderated.example'], undefined, 'hidden immediately');
+  await post('/admin/api/override', { key: 'site:moderated.example', ai: null, pe: null }, admin);
+  assert.ok((await snapshot())['site:moderated.example'], '"Auto" lets the votes decide again');
+  await post('/admin/api/purge', { key: 'site:moderated.example' }, admin);
+  assert.equal((await snapshot())['site:moderated.example'], undefined, 'votes deleted');
+});

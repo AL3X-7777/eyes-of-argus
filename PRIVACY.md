@@ -1,8 +1,8 @@
-# Privacy policy: The Eyes of Argus
+# Privacy policy: Eyes of Argus
 
 _Last updated: 10 November 2026_
 
-The Eyes of Argus is a browser extension that lets you mark YouTube channels, social media
+Eyes of Argus is a browser extension that lets you mark YouTube channels, social media
 accounts and websites as "uses AI" or "owned by private equity", and shows those marks as badges.
 
 ## What stays on your device
@@ -10,6 +10,10 @@ Everything, by default. Your marks, settings and any list you subscribe to are s
 browser's local extension storage. The extension has no analytics, no ads and no tracking, and it
 does not read or store your browsing history. On the supported sites it only looks at links on the
 page to decide where to draw a badge; nothing about the pages you visit is recorded or sent anywhere.
+
+**Badges on every website (optional, off by default).** If you turn this on, your browser asks for
+permission to read all websites. The extension then looks at where links on a page point, to draw
+badges. As on the built-in sites, nothing is recorded or sent.
 
 ## What can leave your device, and only if you turn it on
 **Shared list (optional).** If you enter the address of a shared list, the extension downloads that

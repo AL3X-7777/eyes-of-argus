@@ -3,14 +3,14 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>The Eyes of Argus</title>
+  <title>Eyes of Argus</title>
   <link rel="stylesheet" href="options.css">
 </head>
 <body>
   <header>
     <img src="icons/icon128.png" alt="">
     <div>
-      <h1>The Eyes of Argus</h1>
+      <h1>Eyes of Argus</h1>
       <p class="muted">Mark YouTube channels, social media accounts and websites that use AI or are owned by private equity.</p>
     </div>
   </header>
@@ -30,6 +30,11 @@
         <span><b>Fade marked videos</b><small>Greys out videos from marked channels (hover to see them)</small></span>
         <input type="checkbox" class="switch" data-setting="dim">
       </label>
+      <label class="row">
+        <span><b>Show badges on every website</b><small>Marks then also show next to links on any site, not only the built-in ones. Your browser will ask for permission to read all websites; the extension only looks at where links point and sends nothing. You can mark any link from the right-click menu without this.</small></span>
+        <input type="checkbox" class="switch" id="everywhere">
+      </label>
+      <p id="everywhereStatus" class="muted" aria-live="polite"></p>
     </section>
 
     <section class="card" id="sync">
@@ -58,7 +63,7 @@
         <tbody></tbody>
       </table>
       <p class="muted small">AI / PE: <b>Yes</b> = you say it is, <b>Not</b> = you disagree (hides community and shared marks for you), <b>–</b> = no opinion.</p>
-      <p id="empty" class="muted">No marks yet. On YouTube, a social site or a search results page, right-click a name, post or result → <b>The Eyes of Argus</b>.</p>
+      <p id="empty" class="muted">No marks yet. On YouTube, a social site or a search results page, right-click a name, post or result → <b>Eyes of Argus</b>.</p>
     </section>
 
     <section class="card">
@@ -89,9 +94,10 @@
     <section class="card" id="help">
       <h2>Help</h2>
       <ol>
-        <li><b>Right-click</b> a channel or account name, a video or post, a search result, or an empty spot on a channel or profile page. Works on YouTube, X, Reddit, Instagram, TikTok, Twitch, Facebook, and on Google, Bing and DuckDuckGo results (a result marks its whole website).</li>
-        <li>Choose <b>The Eyes of Argus → Mark as AI</b> or <b>Mark as private-equity owned</b>. A channel can have both.</li>
-        <li>Marked channels get a badge everywhere they appear. Use <b>Clear</b> to remove a mark.</li>
+        <li><b>Right-click</b> any link on any website, a channel or account name, a video or post, a search result, or an empty spot on a page (that marks the channel, profile or website you're on). Works on YouTube, X, Reddit, Instagram, TikTok, Twitch, Facebook, and on Google, Bing and DuckDuckGo results (a result marks its whole website).</li>
+        <li>Choose <b>Eyes of Argus → Mark as AI</b> or <b>Mark as private-equity owned</b>. A channel can have both.</li>
+        <li>On pages without badges, the toolbar icon briefly shows <b>AI</b>, <b>PE</b> or <b>OK</b> to confirm.</li>
+        <li>Marked channels get a badge everywhere they appear. A channel with both marks is shown half purple, half amber. Use <b>Clear</b> to remove a mark.</li>
         <li>If you think a community mark is wrong, choose <b>Not AI</b> or <b>Not PE-owned</b>. That hides it for you and counts as a vote against it.</li>
       </ol>
       <p class="muted"><b>Nothing shows up?</b> Reload tabs that were open before the extension was installed. Some places, like parts of the watch-page sidebar, show the channel name without a link. Right-click the video's thumbnail or open the video instead.</p>

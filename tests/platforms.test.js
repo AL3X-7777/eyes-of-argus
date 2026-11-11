@@ -2,7 +2,7 @@
 'use strict';
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { fakeStorage, youtubePage: page, wait } = require('./helpers');
+const { fakeStorage, youtubePage: page, loadBackground, wait } = require('./helpers');
 
 test('Google: a result is marked by its website; the badge sits on the title', async () => {
   const html = `<div id="search">
@@ -95,10 +95,59 @@ test('Instagram, TikTok, Twitch, Facebook, Bing and DuckDuckGo extract the right
   }
 });
 
-test('pages without an adapter are left alone', async () => {
-  const s = fakeStorage({ marks: { 'site:example.com': { ai: 1, pe: 0 } } });
-  const p = page('<a href="https://example.com" id="a">x</a>', s, 'https://unrelated.example/');
+test('any other website (badges everywhere): outbound links are keyed by where they point', async () => {
+  const s = fakeStorage({ marks: { 'site:example.com': { ai: 1, pe: 1 }, 'x:nasa': { ai: 1, pe: 0 }, 'site:blog.example': { pe: 1, ai: 0 } } });
+  const p = page(`<a href="https://www.example.com/page" id="a">Example</a><a href="https://x.com/NASA" id="b">NASA</a>
+    <a href="/about" id="own">About us</a><a href="https://blog.example/other" id="own2">Home</a>
+    <a href="https://t.co/abc" id="short">short link</a><a href="https://fresh.example/x" id="new">Fresh</a><p id="empty">text</p>`, s, 'https://blog.example/post');
   await wait(300);
-  assert.equal(p.$('a').dataset.argus, undefined);
-  assert.equal(p.api.runtime.onMessage.fns.length, 0);
+  assert.equal(p.$('a').dataset.argus, 'ai pe');
+  assert.equal(p.$('b').dataset.argus, 'ai');
+  assert.equal(p.$('own').dataset.argus, undefined);
+  assert.equal(p.$('own2').dataset.argus, undefined, 'a marked site does not badge its own links');
+  await p.menu('new', 'pe');
+  assert.equal(s.data.marks['site:fresh.example'].pe, 1);
+  await p.menu('short', 'ai');
+  assert.equal(s.data.marks['site:t.co'], undefined, 'link shorteners are not websites');
+  await p.menu('empty', 'ai'); // empty spot → the site you are on
+  assert.equal(s.data.marks['site:blog.example'].ai, 1);
+});
+
+test('built-in sites: a link that leaves the site can be marked by where it points', async () => {
+  const s = fakeStorage();
+  const p = page(`<ytd-rich-item-renderer><a href="/@Chan" id="n">Chan</a><a href="https://shop.example/merch" id="out">Merch</a>
+    <a href="https://www.instagram.com/some.user/" id="ig">Instagram</a></ytd-rich-item-renderer>`, s);
+  await p.menu('out', 'pe');
+  await p.menu('ig', 'ai');
+  assert.deepEqual(Object.keys(s.data.marks).sort(), ['instagram:some.user', 'site:shop.example']);
+});
+
+test('pages without the content script: the background marks from the link or page address', async () => {
+  const s = fakeStorage();
+  const bg = loadBackground(s);
+  bg.api.tabs.sendMessage = async () => { throw new Error('Receiving end does not exist'); };
+  const click = bg.api.contextMenus.onClicked.fns[0];
+  click({ menuItemId: 'ai', frameId: 0, linkUrl: 'https://www.news.example/story', pageUrl: 'https://forum.example/t/1' }, { id: 1 });
+  click({ menuItemId: 'pe', frameId: 0, pageUrl: 'https://forum.example/t/1' }, { id: 1 });
+  click({ menuItemId: 'ai', frameId: 0, linkUrl: 'https://www.youtube.com/@Some_Channel/videos', pageUrl: 'https://forum.example/' }, { id: 1 });
+  click({ menuItemId: 'ai', frameId: 0, linkUrl: 'https://www.youtube.com/watch?v=abc' }, { id: 1 });
+  click({ menuItemId: 'ai', frameId: 2, pageUrl: 'https://ads.example/frame' }, { id: 1 });
+  click({ menuItemId: 'ai', frameId: 0, linkUrl: 'javascript:alert(1)' }, { id: 1 });
+  await wait(150);
+  assert.deepEqual(Object.keys(s.data.marks).sort(), ['@some_channel', 'site:forum.example', 'site:news.example']);
+  assert.equal(s.data.marks['site:forum.example'].pe, 1);
+});
+
+test('"badges on every website" registers and unregisters the content script', async () => {
+  const s = fakeStorage();
+  const bg = loadBackground(s);
+  assert.equal((await bg.ask({ type: 'argus-everywhere', on: true })).ok, true);
+  assert.equal(bg.api.scripting.registered.length, 1);
+  assert.equal(bg.api.scripting.registered[0].matches.join(), 'https://*/*');
+  assert.equal(s.data.everywhere, true);
+  await bg.ask({ type: 'argus-everywhere', on: false });
+  assert.equal(bg.api.scripting.registered.length, 0);
+  assert.equal(s.data.everywhere, false);
+  bg.api.permissions.contains = async () => false;
+  assert.equal((await bg.ask({ type: 'argus-everywhere', on: true })).ok, false, 'refused without the permission');
 });

@@ -15,15 +15,17 @@ MAX_PER_NET = "2"          # max counted votes per channel from installs of one 
 VOTES_PER_DAY = "1000"     # per install
 VOTES_PER_NET_DAY = "5000" # per network (IPv6 grouped by /56)
 REG_PER_NET_DAY = "5"      # new installs per network per day
-MAX_PER_RUN = "1800"       # channels recounted per cron run (free plan: 50 queries/run)
+MAX_PER_RUN = "900"        # channels recounted per cron run (free plan: 50 queries and 10 ms CPU per run)
 
 [[d1_databases]]
 binding = "DB"
 database_name = "argus"
 database_id = "00000000-0000-0000-0000-000000000000"   # replace with the id from `npx wrangler d1 create argus`
 
-[[r2_buckets]]
-binding = "BUCKET"
-bucket_name = "eyes-of-argus"
+# The published community list. KV (not R2) on purpose: on the free plan KV stops with
+# an error at its daily limit and can never bill; R2 needs a payment method and bills overage.
+[[kv_namespaces]]
+binding = "KV"
+id = "00000000000000000000000000000000"   # replace with the id from `npx wrangler kv namespace create argus`
 
 # Secrets (not in this file):  npx wrangler secret put SALT   and   npx wrangler secret put ADMIN_TOKEN

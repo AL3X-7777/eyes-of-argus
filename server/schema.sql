@@ -1,4 +1,4 @@
--- The Eyes of Argus — D1 (SQLite) schema
+-- Eyes of Argus — D1 (SQLite) schema
 
 -- Anonymous installs (deleted with all their votes by POST /forget). id = first 32 hex chars of sha256(secret); the secret never gets stored.
 CREATE TABLE IF NOT EXISTS users (
@@ -26,13 +26,15 @@ CREATE TABLE IF NOT EXISTS channels (
   ai_n       INTEGER NOT NULL DEFAULT 0,
   pe_pct     INTEGER NOT NULL DEFAULT 0,
   pe_n       INTEGER NOT NULL DEFAULT 0,
+  entry      TEXT,                            -- published list entry as JSON, NULL = not shown
   dirty      INTEGER NOT NULL DEFAULT 1,
   recheck_at INTEGER NOT NULL DEFAULT 0,      -- when a vote from a still-new install starts to count (0 = none)
   rev        INTEGER NOT NULL DEFAULT 0,      -- bumped on every vote; a recount only clears dirty if unchanged
   updated_at INTEGER NOT NULL DEFAULT 0
 );
-CREATE INDEX IF NOT EXISTS channels_dirty ON channels (dirty);
-CREATE INDEX IF NOT EXISTS channels_recheck ON channels (recheck_at);
+CREATE INDEX IF NOT EXISTS channels_dirty ON channels (dirty) WHERE dirty = 1;
+CREATE INDEX IF NOT EXISTS channels_recheck ON channels (recheck_at) WHERE recheck_at > 0;
+CREATE INDEX IF NOT EXISTS channels_shown ON channels (key) WHERE entry IS NOT NULL;
 
 -- Your manual decisions. ai/pe: 1 = always show, 0 = never show, NULL = let votes decide.
 -- Edit with:  npx wrangler d1 execute argus --remote --command "INSERT OR REPLACE INTO overrides VALUES ('@x', NULL, 0, 'disputed')"
@@ -48,4 +50,10 @@ CREATE TABLE IF NOT EXISTS limits (
   bucket TEXT PRIMARY KEY,
   day    INTEGER NOT NULL,
   n      INTEGER NOT NULL
+);
+
+-- Small flags. 'stale' = 1 while the published list in KV is older than the channel rows.
+CREATE TABLE IF NOT EXISTS meta (
+  k TEXT PRIMARY KEY,
+  v INTEGER NOT NULL
 );

@@ -1,4 +1,4 @@
-# The Eyes of Argus: architecture and reference
+# Eyes of Argus: architecture and reference
 
 Generated API reference (every function, with its parameters): open `docs/api/index.html`.
 Regenerate it with `npm run docs`.
@@ -13,6 +13,7 @@ Regenerate it with `npm run docs`.
 | `src/background.js` | Firefox event page / Chromium service worker | context menu; **only writer** of marks, vote queue and sync settings; community sync; shared list |
 | `src/options.html/.js/.css` | settings page | shows and edits everything by sending messages to the background |
 | `server/src/index.js` | Cloudflare Worker | registration, votes, forget, snapshot, recount cron |
+| `server/src/admin.js` | Cloudflare Worker | moderation dashboard at `/admin` and its API |
 | `server/src/lib.js` | Worker (and Node tests) | config, IPv6 grouping, request checks, scoring |
 | `build.py` | your PC | builds `dist/firefox` and `dist/chrome` with the right manifest each |
 
@@ -31,6 +32,12 @@ server both use it. On Google, Bing and DuckDuckGo a result is keyed by its webs
 points at a supported platform: then it is keyed by the account (`x:nasa`), and a result that
 points at the platform itself can't be marked, so one result can never mark all of YouTube.
 
+**Any other website.** The right-click menu is on every page. Where the content script doesn't
+run, the background marks from the link address (or the page address) that the menu click hands
+over, and confirms on the toolbar icon. With "Show badges on every website" turned on (an optional
+permission), the content script is registered for all https sites and uses the generic adapter:
+links that leave the current site are keyed by where they point.
+
 To support another site: add an adapter to `src/platforms.js`, its hosts to `SITES` in `build.py`,
 and, for a new key prefix, an entry in `PLATFORMS` in `src/shared.js`.
 
@@ -42,7 +49,7 @@ right-click ─▶ background (menu) ─▶ content.js resolves the channel
 storage change ─▶ every YouTube tab re-tags its links (CSS draws the badges)
 
 queue ─▶ background.syncNow ─▶ POST /votes ─▶ D1 votes, channel marked dirty
-cron (15 min) ─▶ rebuild ─▶ R2 snapshot.json ─▶ GET /snapshot.json (ETag) ─▶ storage: community
+cron (15 min) ─▶ rebuild ─▶ channel rows (D1) ─▶ KV snapshot.json ─▶ GET /snapshot.json (ETag) ─▶ storage: community
 ```
 
 Display priority for each flag: **your mark** (yes / not) → **shared list** → **community list**
@@ -75,6 +82,7 @@ Display priority for each flag: **your mark** (yes / not) → **shared list** �
 | `argus-sync-config` | options → background | `{enabled, server?, withdraw?}` | `{ok}` |
 | `argus-sync-now` | options → background | none | sync status |
 | `argus-update-list` | options → background | none | `{ok, count}` |
+| `argus-everywhere` | options → background | `{on}` | `{ok}` |
 
 The background only answers messages from its own extension (`sender.id`). Pages are told apart by address: only the extension's own pages may send anything other than `argus-mark` (the settings page also runs in a tab, so `sender.tab` can't be used for this).
 
@@ -112,13 +120,17 @@ In `overrideBits`, 1 means AI was set by the admin and 2 means PE was.
 | `POST /register` | `{secret, nonce}` | 200 `{id}`, 400 weak puzzle, 429 network limit |
 | `POST /votes` | `{secret, votes:[{k,f,v,name}], replace?}` (≤ 100) | 200, 400, 401 unknown install, 429 daily limit |
 | `POST /forget` | `{secret}` | 200 |
+| `GET /admin` | none | the moderation dashboard page |
+| `GET /admin/api/channels` | `?q=&shown=1`, `Authorization: Bearer …` | list with tallies and overrides |
+| `POST /admin/api/override` | `{key, ai, pe, note}` | 200, 400, 403 |
+| `POST /admin/api/purge` | `{key}` | 200, 400, 403 |
 | `POST /admin/rebuild` | `Authorization: Bearer …` | 200 `{changed,total}`, 403 |
 
 All POSTs require `content-type: application/json` and a body of 64 KB or less. Any `Origin` header must be an extension origin.
 
 ## Tests and tooling
 
-`npm test` runs 68 tests: content script on every platform, background, settings page, server
+`npm test` runs 72 tests: content script on every platform, background, settings page, server
 end-to-end against a real local `wrangler dev`, and regression tests for every review finding.
 `npm run test:browser` loads the Chrome build into a real Chrome and checks the service worker,
 the settings page and badges on locally served copies of YouTube, Google, X and Reddit pages. `npm run lint` runs ESLint and

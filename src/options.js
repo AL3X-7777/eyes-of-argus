@@ -1,5 +1,5 @@
 /**
- * @file Settings page of The Eyes of Argus.
+ * @file Settings page of Eyes of Argus.
  *
  * Reads everything straight from `storage.local` and re-renders when it changes. It
  * never writes marks, the vote queue or sync settings itself: those changes are sent
@@ -78,6 +78,18 @@
       });
     }
   }
+
+  // "Badges on every website": the permission prompt has to come straight from the click
+  $('#everywhere').addEventListener('change', async e => {
+    const box = e.target;
+    if (box.checked && !(await api.permissions.request({ origins: ['https://*/*'] }).catch(() => false))) {
+      box.checked = false;
+      return setStatus($('#everywhereStatus'), 'Permission was refused, so badges stay limited to the built-in sites.', 'err');
+    }
+    const res = await ask({ type: MSG.EVERYWHERE, on: box.checked });
+    if (!res.ok) { box.checked = !box.checked; return setStatus($('#everywhereStatus'), `Couldn't change it: ${res.error}`, 'err'); }
+    setStatus($('#everywhereStatus'), box.checked ? 'On. Reload open tabs to see badges there.' : 'Off.', 'ok');
+  });
 
   // ---------------------------------------------------------------------------
   // Your marks
@@ -312,8 +324,9 @@
 
   (async () => {
     await loadSettings();
-    const d = await api.storage.local.get(['marks', 'sharedList', 'listUrl']);
+    const d = await api.storage.local.get(['marks', 'sharedList', 'listUrl', 'everywhere']);
     marks = d.marks || {};
+    $('#everywhere').checked = !!d.everywhere;
     $('#listUrl').value = d.listUrl || '';
     showListInfo(d.sharedList, d.listUrl);
     await renderSync();

@@ -1,5 +1,5 @@
 /**
- * @file Shared helpers for every part of The Eyes of Argus.
+ * @file Shared helpers for every part of Eyes of Argus.
  *
  * Loaded first in every context:
  * - the YouTube content script (`manifest.content_scripts`),
@@ -42,6 +42,20 @@
     SYNC_NOW: 'argus-sync-now',
     /** options → background: (re)download the subscribed shared list */
     UPDATE_LIST: 'argus-update-list',
+    /** options → background: show badges on every website or only the built-in ones `{on}` */
+    EVERYWHERE: 'argus-everywhere',
+  });
+
+  /**
+   * Right-click menu actions: the flag changes each one makes and its confirmation text.
+   * @type {Object<string, {changes: Object<string, number>, msg: string}>}
+   */
+  const ACTIONS = Object.freeze({
+    ai:    { changes: { ai: 1 },        msg: 'marked as AI' },
+    pe:    { changes: { pe: 1 },        msg: 'marked as private-equity owned' },
+    notai: { changes: { ai: -1 },       msg: 'marked as not AI' },
+    notpe: { changes: { pe: -1 },       msg: 'marked as not PE-owned' },
+    clear: { changes: { ai: 0, pe: 0 }, msg: 'cleared' },
   });
 
   /** Tunables that client and server must agree on. */
@@ -133,6 +147,16 @@
    */
   function labelForKey(key) {
     return PLATFORMS[platformOf(key)]?.label || 'YouTube';
+  }
+
+  /**
+   * A readable default name for a key when the page offers none.
+   * @param {string} key canonical key
+   * @returns {string} e.g. `"example.com"`, `"nasa"`, `"@nileblue"`
+   */
+  function nameForKey(key) {
+    const i = key.indexOf(':');
+    return i > 0 ? key.slice(i + 1) : key;
   }
 
   /**
@@ -273,8 +297,8 @@
   }
 
   root.Argus = Object.freeze({
-    FLAGS, MSG, LIMITS,
-    normalizeKey, isChannelId, keyFromHref, platformOf, labelForKey, urlForKey, siteKey, val, cleanName, serverBase, queueKey,
+    FLAGS, MSG, LIMITS, ACTIONS,
+    normalizeKey, isChannelId, keyFromHref, platformOf, labelForKey, nameForKey, urlForKey, siteKey, val, cleanName, serverBase, queueKey,
     isCommunityEntry, toHex, sha256hex, zeroBits,
   });
 })(globalThis);

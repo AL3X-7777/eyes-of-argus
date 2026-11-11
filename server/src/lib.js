@@ -31,7 +31,7 @@ export function cfg(env) {
     votesPerDay: num(env.VOTES_PER_DAY, 1000),
     votesPerNetDay: num(env.VOTES_PER_NET_DAY, 5000),
     regPerNetDay: num(env.REG_PER_NET_DAY, 5),
-    maxPerRun: Math.min(num(env.MAX_PER_RUN, 1800), 1800), // free plan: 50 queries per run
+    maxPerRun: Math.min(num(env.MAX_PER_RUN, 900), 1800), // free plan: 50 queries and 10 ms CPU per run
   };
 }
 
@@ -129,11 +129,10 @@ export function chunks(arr, n) {
  * Turns one channel's weighted tally into its community entry.
  * @param {Object} t per flag `{up, down, n}` (weighted up/down, raw count)
  * @param {Object} [ov] admin override (1 show, 0 hide)
- * @param {string} name
  * @param {{minVotes: number, minAgree: number}} c
  * @returns {{entry: Array|null, raw: Object, total: number}} entry null = not shown
  */
-export function score(t, ov, name, c) {
+export function score(t, ov, c) {
   const out = [];
   const raw = {};
   let overrides = 0, total = 0;
@@ -150,7 +149,17 @@ export function score(t, ov, name, c) {
     out.push(shown ? Math.max(pct, ov?.[f] === 1 && !pct ? 100 : 1) : 0, weighted);
   });
   if (!out[0] && !out[2]) return { entry: null, raw, total };
-  const entry = [...out, name || ''];
+  const entry = [...out, '']; // fifth slot kept for compatibility; voter-supplied names are never published
   if (overrides) entry.push(overrides);
   return { entry, raw, total };
 }
+
+/**
+ * JSON response.
+ * @param {any} data
+ * @param {number} [status]
+ * @param {Object} [headers]
+ * @returns {Response}
+ */
+export const json = (data, status = 200, headers = {}) =>
+  new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json', ...headers } });

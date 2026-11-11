@@ -1,4 +1,4 @@
-// ESLint flat config for The Eyes of Argus.
+// ESLint flat config for Eyes of Argus.
 'use strict';
 const js = require('@eslint/js');
 const globals = require('globals');

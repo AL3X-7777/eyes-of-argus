@@ -1,5 +1,5 @@
 /**
- * @file Background script of The Eyes of Argus.
+ * @file Background script of Eyes of Argus.
  *
  * Runs as an event page in Firefox and as a service worker in Chromium; either can be
  * stopped at any time and restarted by an event, so every listener is registered
@@ -30,19 +30,20 @@
  * | communityMeta  | background  | `{count, etag, generated, checked}` |
  * | syncStatus     | background  | result of the last sync |
  * | sharedList     | background  | `{channels, count, updated}` |
+ * | everywhere     | background  | true while badges are shown on every website |
  * | listUrl        | options     | subscribed shared-list URL |
  * | settings       | options     | `{badges, tint, dim}` display toggles |
  */
 'use strict';
 
 /* global importScripts */
-if (typeof importScripts === 'function' && !globalThis.Argus) importScripts('shared.js'); // Chromium service worker
+if (typeof importScripts === 'function' && !globalThis.Argus) importScripts('shared.js', 'platforms.js'); // Chromium service worker
 
 const api = globalThis.browser ?? globalThis.chrome;
 const A = globalThis.Argus;
 const { FLAGS, MSG, LIMITS } = A;
 
-/** Sites the menu appears on: the same list the content script runs on (see build.py). */
+/** Sites with a built-in adapter: the list the content script always runs on (see build.py). */
 const SITES = api.runtime.getManifest?.().content_scripts?.[0]?.matches || ['*://*.youtube.com/*'];
 const SYNC_ALARM = 'argus-sync';        // periodic: download the community list, retry votes
 const FLUSH_ALARM = 'argus-flush';      // one-shot backup for sending fresh votes
@@ -586,15 +587,16 @@ async function updateShared() {
 // Context menu
 // ---------------------------------------------------------------------------
 
-const MENU_ACTIONS = ['ai', 'pe', 'notai', 'notpe', 'clear'];
+const MENU_ACTIONS = Object.keys(A.ACTIONS);
 const MENU_CONTEXTS = ['page', 'link', 'image', 'video', 'selection'];
+const EVERYWHERE_ID = 'argus-everywhere';
 
-/** (Re)creates the right-click menu. Firefox for Android has no menus API. */
+/** (Re)creates the right-click menu (on every page). Firefox for Android has no menus API. */
 async function buildMenus() {
   if (!api.contextMenus) return;
   await api.contextMenus.removeAll();
   const add = o => api.contextMenus.create({ contexts: MENU_CONTEXTS, ...o });
-  add({ id: 'argus', title: 'The Eyes of Argus', documentUrlPatterns: SITES });
+  add({ id: 'argus', title: 'Eyes of Argus' });
   add({ id: 'ai', parentId: 'argus', title: 'Mark as AI' });
   add({ id: 'pe', parentId: 'argus', title: 'Mark as private-equity owned' });
   add({ id: 'sep1', parentId: 'argus', type: 'separator' });
@@ -606,18 +608,79 @@ async function buildMenus() {
   add({ id: 'help', parentId: 'argus', title: 'Help' });
 }
 
+/**
+ * Briefly shows a result on the toolbar icon. Used on pages where the content script
+ * doesn't run, so there is no in-page confirmation.
+ * @param {string} text e.g. "AI", "PE", "OK" or "?"
+ * @param {boolean} ok green for done, amber for "nothing to mark"
+ */
+function flash(text, ok) {
+  if (!api.action?.setBadgeText) return;
+  api.action.setBadgeBackgroundColor?.({ color: ok ? '#16a34a' : '#b45309' });
+  api.action.setBadgeText({ text });
+  const timer = setTimeout(() => api.action.setBadgeText({ text: '' }), 3000);
+  timer?.unref?.();
+}
+
+/**
+ * Marks from the address alone: the right-clicked link, or (top frame, no link) the
+ * page itself. The menu click hands these addresses over without any site permission,
+ * which is what makes "mark any link on any website" work.
+ * @param {string} action one of `A.ACTIONS`
+ * @param {{linkUrl: string, pageUrl: string, frameId: number, linkText: string}} info
+ * @returns {Promise<Object>} result of {@link applyMark}, or `{ok: false}`
+ */
+async function markFromUrl(action, info) {
+  const url = info.linkUrl || ((info.frameId ?? 0) === 0 ? info.pageUrl : null);
+  const key = url ? globalThis.ArgusPlatforms.keyForUrl(url) : null;
+  if (!key) { flash('?', false); return { ok: false, error: 'nothing to mark' }; }
+  const res = await applyMark({ key, name: A.nameForKey(key), changes: A.ACTIONS[action].changes });
+  flash(res.ok ? ({ ai: 'AI', pe: 'PE' }[action] || 'OK') : '!', res.ok);
+  return res;
+}
+
 if (api.contextMenus) {
   api.contextMenus.onClicked.addListener((info, tab) => {
     const id = info.menuItemId;
     if (id === 'settings') return api.runtime.openOptionsPage();
     if (id === 'help') return api.tabs.create({ url: api.runtime.getURL('options.html#help') });
-    // Only the top frame runs the content script; a click inside an iframe (live chat,
-    // embeds) would otherwise act on whatever was right-clicked before.
-    if (!MENU_ACTIONS.includes(id) || tab?.id == null || (info.frameId ?? 0) !== 0) return;
-    api.tabs.sendMessage(tab.id, { type: MSG.MENU, action: id }, { frameId: 0 })
-      .catch(() => {}); // tab opened before install: needs a reload
+    if (!MENU_ACTIONS.includes(id)) return;
+    // Only the top frame runs the content script. Inside an iframe (live chat, embeds)
+    // only the link address is reliable; without one, nothing is marked.
+    if ((info.frameId ?? 0) !== 0 || tab?.id == null) { if (info.linkUrl) markFromUrl(id, info); return; }
+    // Pages with the content script resolve the click themselves (they know about
+    // cards, profiles and search results); everywhere else the address decides.
+    Promise.resolve(api.tabs.sendMessage(tab.id, { type: MSG.MENU, action: id }, { frameId: 0 }))
+      .then(res => { if (!res?.handled) markFromUrl(id, info); }, () => markFromUrl(id, info));
   });
 }
+
+/**
+ * Turns "badges on every website" on or off by (un)registering the content script for
+ * all https sites. The settings page asks for the site permission before calling this.
+ * @param {{on: boolean}} msg
+ * @returns {Promise<{ok: boolean, error: string}>}
+ */
+async function setEverywhere(msg) {
+  if (!api.scripting?.registerContentScripts) return { ok: false, error: 'not supported in this browser' };
+  const on = !!msg.on;
+  if (on && !(await api.permissions.contains({ origins: ['https://*/*'] }))) return { ok: false, error: 'permission missing' };
+  const have = await api.scripting.getRegisteredContentScripts({ ids: [EVERYWHERE_ID] }).catch(() => []);
+  if (have.length) await api.scripting.unregisterContentScripts({ ids: [EVERYWHERE_ID] });
+  if (on) {
+    await api.scripting.registerContentScripts([{
+      id: EVERYWHERE_ID, matches: ['https://*/*'], excludeMatches: SITES, // built-in sites already have it
+      js: ['shared.js', 'platforms.js', 'content.js'], css: ['content.css'], runAt: 'document_start', persistAcrossSessions: true,
+    }]);
+  }
+  await set({ everywhere: on });
+  return { ok: true };
+}
+
+// If the permission is taken away in the browser's own settings, switch the feature off.
+api.permissions?.onRemoved?.addListener(p => {
+  if ((p.origins || []).some(o => o === 'https://*/*' || o === '*://*/*' || o === '<all_urls>')) setEverywhere({ on: false });
+});
 
 api.action?.onClicked.addListener(() => api.runtime.openOptionsPage());
 
@@ -650,6 +713,7 @@ const HANDLERS = {
   [MSG.SYNC_CONFIG]: configureSync,
   [MSG.SYNC_NOW]: syncNow,
   [MSG.UPDATE_LIST]: updateShared,
+  [MSG.EVERYWHERE]: setEverywhere,
 };
 
 /** Messages a YouTube tab may send; everything else only from the extension's own pages. */

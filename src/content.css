@@ -1,4 +1,4 @@
-/* The Eyes of Argus — styles injected into YouTube */
+/* Eyes of Argus — styles injected into YouTube */
 
 html.argus-badges [data-argus]::after {
   display: inline-block;
@@ -13,11 +13,21 @@ html.argus-badges [data-argus]::after {
 }
 html.argus-badges [data-argus="ai"]::after    { content: "AI";      background: #7c3aed; }
 html.argus-badges [data-argus="pe"]::after    { content: "PE";      background: #d97706; }
-html.argus-badges [data-argus="ai pe"]::after { content: "AI · PE"; background: linear-gradient(90deg, #7c3aed, #d97706); }
+html.argus-badges [data-argus="ai pe"]::after { content: "AI · PE"; background: linear-gradient(90deg, #7c3aed 50%, #d97706 50%); }
 
 html.argus-tint [data-argus="ai"],    html.argus-tint [data-argus="ai"] *    { color: #8b5cf6 !important; }
 html.argus-tint [data-argus="pe"],    html.argus-tint [data-argus="pe"] *    { color: #d97706 !important; }
-html.argus-tint [data-argus="ai pe"], html.argus-tint [data-argus="ai pe"] * { color: #ea580c !important; }
+/* Both marks: the name is half purple (AI), half amber (PE) */
+html.argus-tint [data-argus="ai pe"] {
+  background-image: linear-gradient(90deg, #8b5cf6 50%, #d97706 50%) !important;
+  -webkit-background-clip: text !important;
+  background-clip: text !important;
+  -webkit-text-fill-color: transparent !important;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+html.argus-tint [data-argus="ai pe"] * { -webkit-text-fill-color: transparent !important; background: none !important; }
+html.argus-tint [data-argus="ai pe"]::after { -webkit-text-fill-color: #fff !important; }
 
 html.argus-dim [data-argus-card] {
   opacity: .35;
@@ -45,3 +55,5 @@ html.argus-dim [data-argus-card]:hover { opacity: 1; filter: none; }
 }
 #argus-toast.show { opacity: 1; transform: translate(-50%, 0); }
 #argus-toast.warn { border-color: #b45309; }
+/* Block-level titles (search results) are wider than their text: shrink the box so the split falls mid-title */
+html.argus-tint h3[data-argus="ai pe"] { width: fit-content; max-width: 100%; }

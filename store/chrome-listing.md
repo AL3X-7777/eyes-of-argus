@@ -3,7 +3,7 @@
 **Package to upload:** `dist/eyes-of-argus-chrome-<version>.zip`
 
 ## Store listing tab
-- **Name:** The Eyes of Argus
+- **Name:** Eyes of Argus
 - **Summary (max 132 characters):**
   Mark YouTube channels, social accounts and search results that use AI or are owned by private equity. Works offline.
 - **Category:** Tools (or "Social & Communication")
@@ -11,9 +11,9 @@
 
 **Description:**
 
-The Eyes of Argus lets you label who is behind what you watch and read.
+Eyes of Argus lets you label who is behind what you watch and read.
 
-Right-click a YouTube channel, a social media account or a search result and mark it as:
+Right-click any link, a YouTube channel, a social media account or a search result and mark it as:
 • AI: the channel, account or site relies on AI-generated content
 • PE: owned by private equity
 
@@ -25,6 +25,8 @@ Works on:
 • Google, Bing and DuckDuckGo results (a result marks its whole website)
 
 Features:
+• Mark any link on any website from the right-click menu; optionally show badges on every site
+• A channel with both marks is shown half purple, half amber
 • Works offline: your marks are stored in your browser, no account needed
 • Export and import your marks, or subscribe to a list someone else maintains
 • Optional community sync: share your marks as anonymous votes with a sync server you choose, and see marks that enough people agree on
@@ -49,12 +51,13 @@ Source code: https://github.com/AL3X-7777/eyes-of-argus
 
 | Permission | Justification |
 |---|---|
-| `contextMenus` | Adds the "The Eyes of Argus" right-click menu used to mark the channel, account or search result under the cursor. |
+| `contextMenus` | Adds the "Eyes of Argus" right-click menu used to mark the channel, account or search result under the cursor. |
 | `storage` | Stores the user's marks, settings and the optional downloaded lists locally. |
 | `unlimitedStorage` | The optional community list can exceed the default 10 MB local storage quota. |
+| `scripting` | Only used when the user turns on "Show badges on every website": registers the extension's own content script (the same files as in the package) for all https sites. No remote code. |
 | `alarms` | Periodically refreshes the optional shared list and community list, and retries sending votes made offline. |
 | Site access via content scripts (YouTube, X, Reddit, Instagram, TikTok, Twitch, Facebook, Google/Bing/DuckDuckGo search; no `host_permissions` are requested) | The content script reads links on these pages to draw badges next to marked channels, accounts and results, and to identify what the user right-clicked. No page content is collected or transmitted. |
-| Optional host permission `https://*/*` | Requested at runtime, for one origin only, when the user enters the address of a shared list or sync server, so the extension can download from / send votes to that server. Never requested otherwise. |
+| Optional host permission `https://*/*` | Never requested at install. Requested at runtime in two cases: (1) for one origin only, when the user enters the address of a shared list or sync server; (2) for all https sites, when the user turns on "Show badges on every website", so badges can be drawn next to links on any page. |
 
 **Data usage:** the extension collects nothing by default. With community sync turned on by the
 user, votes (which channel or site, which flag, yes/no) are sent to the server the user entered.
