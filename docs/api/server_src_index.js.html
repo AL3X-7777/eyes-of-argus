@@ -42,11 +42,13 @@
  *
  * Abuse resistance (see server/README.md, "Threat model"): POSTs only from extensions
  * or non-browser clients; daily limits per install and per network (IPv6 grouped by
- * /56); new installs carry no weight for their first days; at most `MAX_PER_NET`
- * votes per channel count from installs registered on the same network.
+ * /56); at most `maxPerNet` votes per channel count from installs registered on the
+ * same network; an optional warm-up period for new installs. The vote rules themselves
+ * are set in the moderation dashboard (schema.js `loadState`).
  */
 import { A, DAY, cfg, netOf, originAllowed, readJson, chunks, score, json } from './lib.js';
 import { admin } from './admin.js';
+import { ensureSchema, loadState } from './schema.js';
 
 const SNAPSHOT = 'snapshot.json';
 /** Fixed edge-cache key for the snapshot, so a rebuild can invalidate it. */
@@ -136,6 +138,7 @@ async function register(req, env, body) {
 /** `POST /votes` (with `replace: true`, first deletes all of this install's votes) */
 async function votes(req, env, body) {
   const c = cfg(env);
+  const { ids } = await loadState(env);
   const replace = body?.replace === true;
   if (!body || !Array.isArray(body.votes) || body.votes.length > A.LIMITS.MAX_BATCH || (!body.votes.length &amp;&amp; !replace)) {
     return json({ error: 'bad request' }, 400);
@@ -146,7 +149,7 @@ async function votes(req, env, body) {
   const clean = [];
   for (const v of body.votes) {
     const k = A.normalizeKey(v?.k);
-    if (!k || !A.FLAGS.includes(v?.f) || ![-1, 0, 1].includes(v?.v)) continue;
+    if (!k || !ids.includes(v?.f) || ![-1, 0, 1].includes(v?.v)) continue;
     clean.push({ k, f: v.f, v: v.v, name: A.cleanName(v.name) || null });
   }
   if (!clean.length &amp;&amp; !replace) return json({ error: 'no valid votes' }, 400);
@@ -231,6 +234,7 @@ async function snapshot(req, env, ctx) {
  */
 async function rebuild(env) {
   const c = cfg(env);
+  const { rules, ids, extra } = await loadState(env);
   const now = Date.now();
   // Yesterday's rate-limit counters: cleaned once a day (the first run after midnight UTC)
   if (now % DAY &lt; 16 * 60e3) await env.DB.prepare('DELETE FROM limits WHERE day &lt; ?').bind(today()).run();
@@ -245,6 +249,7 @@ async function rebuild(env) {
     todo = todo.concat(due);
   }
 
+  const warmupMs = rules.warmupDays * DAY;
   let listChanged = false;
   for (const part of chunks(todo, 90)) {
     const keys = part.map(r => r.key);
@@ -262,30 +267,31 @@ async function rebuild(env) {
                 SUM(CASE WHEN val > 0 AND rn &lt;= ?2 THEN w ELSE 0 END) AS up,
                 SUM(CASE WHEN val &lt; 0 AND rn &lt;= ?2 THEN w ELSE 0 END) AS down
          FROM ranked GROUP BY k, f`
-      ).bind(now - c.warmupMs, c.maxPerNet, ...keys),
-      env.DB.prepare(`SELECT key, ai, pe FROM overrides WHERE key IN (${plain})`).bind(...keys),
-      env.DB.prepare(`SELECT key, entry FROM channels WHERE key IN (${plain})`).bind(...keys),
+      ).bind(now - warmupMs, rules.maxPerNet, ...keys),
+      env.DB.prepare(`SELECT key, flag, value FROM overrides WHERE key IN (${plain})`).bind(...keys),
+      env.DB.prepare(`SELECT key, entry, extra FROM channels WHERE key IN (${plain})`).bind(...keys),
     ]);
-    const t = {};
+    const t = {}, ov = {};
     for (const r of tallies.results) (t[r.k] ||= {})[r.f] = r;
-    const ov = Object.fromEntries(overrides.results.map(r => [r.key, r]));
-    const old = Object.fromEntries(rows.results.map(r => [r.key, r.entry]));
+    for (const r of overrides.results) (ov[r.key] ||= {})[r.flag] = r.value;
+    const old = Object.fromEntries(rows.results.map(r => [r.key, (r.entry || '') + '|' + (r.extra || '')]));
 
     const stmts = [];
     for (const { key, rev } of part) {
-      const s = score(t[key], ov[key], c);
+      const s = score(t[key], ov[key], rules, ids);
       const entry = s.entry ? JSON.stringify(s.entry) : null;
-      if (entry !== (old[key] ?? null)) listChanged = true;
+      const more = s.extra ? JSON.stringify(s.extra) : null;
+      if ((entry || '') + '|' + (more || '') !== (old[key] ?? '|')) listChanged = true;
       // Votes from installs still in their warm-up count later: note when the first of
       // them matures, so the channel is recounted then (without staying in the queue).
-      const born = A.FLAGS.map(f => t[key]?.[f]?.young).filter(Boolean);
-      const recheck = born.length ? Math.min(...born) + c.warmupMs + 1 : 0;
+      const born = Object.values(t[key] || {}).map(r => r.young).filter(Boolean);
+      const recheck = born.length ? Math.min(...born) + warmupMs + 1 : 0;
       stmts.push(s.total === 0 &amp;&amp; !ov[key]
         ? env.DB.prepare('DELETE FROM channels WHERE key = ? AND rev = ?').bind(key, rev)
         : env.DB.prepare(
-          `UPDATE channels SET ai_pct = ?, ai_n = ?, pe_pct = ?, pe_n = ?, entry = ?, dirty = 0, recheck_at = ?, updated_at = ?
+          `UPDATE channels SET entry = ?, extra = ?, tally = ?, votes = ?, shown = ?, dirty = 0, recheck_at = ?, updated_at = ?
            WHERE key = ? AND rev = ?`
-        ).bind(s.raw.ai.pct, s.raw.ai.n, s.raw.pe.pct, s.raw.pe.n, entry, recheck, now, key, rev));
+        ).bind(entry, more, JSON.stringify(s.tally), s.total, entry || more ? 1 : 0, recheck, now, key, rev));
     }
     if (listChanged) stmts.push(env.DB.prepare("INSERT OR REPLACE INTO meta (k, v) VALUES ('stale', 1)"));
     await env.DB.batch(stmts);
@@ -293,22 +299,29 @@ async function rebuild(env) {
 
   const stale = listChanged || (await env.DB.prepare("SELECT v FROM meta WHERE k = 'stale'").first())?.v === 1;
   let total;
-  if (stale) total = await publish(env, c, now);
+  if (stale) total = await publish(env, rules, extra, now);
   return { changed: todo.length, ...(total === undefined ? {} : { total }) };
 }
 
 /**
  * Writes the community list to KV from the channel rows. The JSON is assembled from the
  * stored entry strings without re-parsing them (CPU time is limited to 10 ms on the free plan).
+ *
+ * Layout: `c` holds the AI/PE entries in the format every extension version reads;
+ * `x` holds the entries of added categories and `cats` their definitions (older
+ * extensions ignore both).
+ *
  * @param {Object} env
- * @param {Object} c config
+ * @param {Object} rules vote rules
+ * @param {Array&lt;Object>} extra categories added in the dashboard
  * @param {number} now
  * @returns {Promise&lt;number>} number of channels in the list
  */
-async function publish(env, c, now) {
-  const { results } = await env.DB.prepare('SELECT key, entry FROM channels WHERE entry IS NOT NULL').all();
-  const body = `{"v":1,"generated":${now},"min":{"votes":${c.minVotes},"agree":${c.minAgree}},"c":{${
-    results.map(r => `${JSON.stringify(r.key)}:${r.entry}`).join(',')}}}`;
+async function publish(env, rules, extra, now) {
+  const { results } = await env.DB.prepare('SELECT key, entry, extra FROM channels WHERE shown = 1').all();
+  const part = col => results.filter(r => r[col]).map(r => `${JSON.stringify(r.key)}:${r[col]}`).join(',');
+  const body = `{"v":1,"generated":${now},"min":{"votes":${rules.minVotes},"factor":${rules.notFactor}},` +
+    `"cats":${JSON.stringify(extra)},"c":{${part('entry')}},"x":{${part('extra')}}}`;
   await env.KV.put(SNAPSHOT, body, { metadata: { etag: `"g${now}"` } });
   await env.DB.prepare("INSERT OR REPLACE INTO meta (k, v) VALUES ('stale', 0)").run();
   await globalThis.caches?.default.delete(new Request(CACHE_KEY));
@@ -328,9 +341,11 @@ export default {
     try {
       if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS_GET });
       if (req.method === 'GET' &amp;&amp; pathname === '/snapshot.json') return await snapshot(req, env, ctx);
+      if (req.method === 'GET' &amp;&amp; pathname === '/admin') return await admin(req, env, pathname, rebuild);
+      await ensureSchema(env); // upgrades a database created by an older version
       if (req.method === 'GET' &amp;&amp; pathname === '/config') {
-        const c = cfg(env);
-        return json({ powBits: c.powBits, minVotes: c.minVotes, minAgree: c.minAgree, maxBatch: A.LIMITS.MAX_BATCH }, 200, CORS_GET);
+        const { rules } = await loadState(env);
+        return json({ powBits: cfg(env).powBits, minVotes: rules.minVotes, notFactor: rules.notFactor, maxBatch: A.LIMITS.MAX_BATCH }, 200, CORS_GET);
       }
       if (pathname === '/admin' || pathname.startsWith('/admin/')) return await admin(req, env, pathname, rebuild);
       if (req.method !== 'POST') return json({ error: 'not found' }, 404);
@@ -348,7 +363,7 @@ export default {
 
   /** Cron trigger: recount changed channels. */
   async scheduled(_event, env, ctx) {
-    ctx.waitUntil(rebuild(env));
+    ctx.waitUntil(ensureSchema(env).then(() => rebuild(env)));
   },
 };
 </code></pre>
@@ -361,7 +376,7 @@ export default {
 </div>
 
 <nav>
-    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="HttpError.html">HttpError</a></li></ul><h3>Global</h3><ul><li><a href="global.html#A">A</a></li><li><a href="global.html#CACHE_KEY">CACHE_KEY</a></li><li><a href="global.html#CACHE_SECONDS">CACHE_SECONDS</a></li><li><a href="global.html#CORS_GET">CORS_GET</a></li><li><a href="global.html#DAY">DAY</a></li><li><a href="global.html#EVERYWHERE">EVERYWHERE</a></li><li><a href="global.html#FROM_TABS">FROM_TABS</a></li><li><a href="global.html#HANDLERS">HANDLERS</a></li><li><a href="global.html#IMPORT">IMPORT</a></li><li><a href="global.html#MARK">MARK</a></li><li><a href="global.html#MAX_BATCH">MAX_BATCH</a></li><li><a href="global.html#MAX_BODY">MAX_BODY</a></li><li><a href="global.html#MAX_NAME">MAX_NAME</a></li><li><a href="global.html#MENU">MENU</a></li><li><a href="global.html#POW_MAX_BITS">POW_MAX_BITS</a></li><li><a href="global.html#SITES">SITES</a></li><li><a href="global.html#SYNC_CONFIG">SYNC_CONFIG</a></li><li><a href="global.html#SYNC_NOW">SYNC_NOW</a></li><li><a href="global.html#UPDATE_LIST">UPDATE_LIST</a></li><li><a href="global.html#WIPE">WIPE</a></li><li><a href="global.html#admin">admin</a></li><li><a href="global.html#allow">allow</a></li><li><a href="global.html#applyMark">applyMark</a></li><li><a href="global.html#buildMenus">buildMenus</a></li><li><a href="global.html#cfg">cfg</a></li><li><a href="global.html#chunks">chunks</a></li><li><a href="global.html#configureSync">configureSync</a></li><li><a href="global.html#dirtyUserChannels">dirtyUserChannels</a></li><li><a href="global.html#ensureIdentity">ensureIdentity</a></li><li><a href="global.html#expandV6">expandV6</a></li><li><a href="global.html#fetchCommunity">fetchCommunity</a></li><li><a href="global.html#flash">flash</a></li><li><a href="global.html#flushQueue">flushQueue</a></li><li><a href="global.html#forHost">forHost</a></li><li><a href="global.html#forget">forget</a></li><li><a href="global.html#get">get</a></li><li><a href="global.html#importData">importData</a></li><li><a href="global.html#json">json</a></li><li><a href="global.html#list">list</a></li><li><a href="global.html#markFromUrl">markFromUrl</a></li><li><a href="global.html#netHash">netHash</a></li><li><a href="global.html#netOf">netOf</a></li><li><a href="global.html#normalizeShared">normalizeShared</a></li><li><a href="global.html#num">num</a></li><li><a href="global.html#originAllowed">originAllowed</a></li><li><a href="global.html#page">page</a></li><li><a href="global.html#post">post</a></li><li><a href="global.html#publish">publish</a></li><li><a href="global.html#queueVotes">queueVotes</a></li><li><a href="global.html#readJson">readJson</a></li><li><a href="global.html#readMark">readMark</a></li><li><a href="global.html#rebuild">rebuild</a></li><li><a href="global.html#register">register</a></li><li><a href="global.html#safeEqual">safeEqual</a></li><li><a href="global.html#scheduleFlush">scheduleFlush</a></li><li><a href="global.html#score">score</a></li><li><a href="global.html#sendPendingForget">sendPendingForget</a></li><li><a href="global.html#serial">serial</a></li><li><a href="global.html#set">set</a></li><li><a href="global.html#setEverywhere">setEverywhere</a></li><li><a href="global.html#setup">setup</a></li><li><a href="global.html#snapshot">snapshot</a></li><li><a href="global.html#solvePow">solvePow</a></li><li><a href="global.html#syncNow">syncNow</a></li><li><a href="global.html#syncOnce">syncOnce</a></li><li><a href="global.html#touch">touch</a></li><li><a href="global.html#unqueue">unqueue</a></li><li><a href="global.html#updateShared">updateShared</a></li><li><a href="global.html#userFromSecret">userFromSecret</a></li><li><a href="global.html#votes">votes</a></li><li><a href="global.html#wipe">wipe</a></li></ul>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="HttpError.html">HttpError</a></li></ul><h3>Global</h3><ul><li><a href="global.html#A">A</a></li><li><a href="global.html#CACHE_KEY">CACHE_KEY</a></li><li><a href="global.html#CACHE_SECONDS">CACHE_SECONDS</a></li><li><a href="global.html#CORS_GET">CORS_GET</a></li><li><a href="global.html#DAY">DAY</a></li><li><a href="global.html#EVERYWHERE">EVERYWHERE</a></li><li><a href="global.html#FROM_TABS">FROM_TABS</a></li><li><a href="global.html#HANDLERS">HANDLERS</a></li><li><a href="global.html#IMPORT">IMPORT</a></li><li><a href="global.html#MARK">MARK</a></li><li><a href="global.html#MAX_BATCH">MAX_BATCH</a></li><li><a href="global.html#MAX_BODY">MAX_BODY</a></li><li><a href="global.html#MAX_NAME">MAX_NAME</a></li><li><a href="global.html#MENU">MENU</a></li><li><a href="global.html#MENU_OTHER">MENU_OTHER</a></li><li><a href="global.html#POW_MAX_BITS">POW_MAX_BITS</a></li><li><a href="global.html#RULE_DEFAULTS">RULE_DEFAULTS</a></li><li><a href="global.html#SITES">SITES</a></li><li><a href="global.html#SYNC_CONFIG">SYNC_CONFIG</a></li><li><a href="global.html#SYNC_NOW">SYNC_NOW</a></li><li><a href="global.html#UPDATE_LIST">UPDATE_LIST</a></li><li><a href="global.html#UPGRADE_V2">UPGRADE_V2</a></li><li><a href="global.html#WIPE">WIPE</a></li><li><a href="global.html#admin">admin</a></li><li><a href="global.html#allow">allow</a></li><li><a href="global.html#applyMark">applyMark</a></li><li><a href="global.html#buildMenus">buildMenus</a></li><li><a href="global.html#catIds">catIds</a></li><li><a href="global.html#cfg">cfg</a></li><li><a href="global.html#chunks">chunks</a></li><li><a href="global.html#cleanRules">cleanRules</a></li><li><a href="global.html#configureSync">configureSync</a></li><li><a href="global.html#dirtyAll">dirtyAll</a></li><li><a href="global.html#dirtyUserChannels">dirtyUserChannels</a></li><li><a href="global.html#ensureIdentity">ensureIdentity</a></li><li><a href="global.html#ensureSchema">ensureSchema</a></li><li><a href="global.html#expandV6">expandV6</a></li><li><a href="global.html#fetchCommunity">fetchCommunity</a></li><li><a href="global.html#flash">flash</a></li><li><a href="global.html#flushQueue">flushQueue</a></li><li><a href="global.html#forHost">forHost</a></li><li><a href="global.html#forget">forget</a></li><li><a href="global.html#get">get</a></li><li><a href="global.html#getCats">getCats</a></li><li><a href="global.html#hasOpinion">hasOpinion</a></li><li><a href="global.html#importData">importData</a></li><li><a href="global.html#json">json</a></li><li><a href="global.html#list">list</a></li><li><a href="global.html#loadState">loadState</a></li><li><a href="global.html#markFromUrl">markFromUrl</a></li><li><a href="global.html#netHash">netHash</a></li><li><a href="global.html#netOf">netOf</a></li><li><a href="global.html#normalizeShared">normalizeShared</a></li><li><a href="global.html#num">num</a></li><li><a href="global.html#originAllowed">originAllowed</a></li><li><a href="global.html#page">page</a></li><li><a href="global.html#post">post</a></li><li><a href="global.html#publish">publish</a></li><li><a href="global.html#queueVotes">queueVotes</a></li><li><a href="global.html#readJson">readJson</a></li><li><a href="global.html#readMark">readMark</a></li><li><a href="global.html#rebuild">rebuild</a></li><li><a href="global.html#register">register</a></li><li><a href="global.html#safeEqual">safeEqual</a></li><li><a href="global.html#scheduleFlush">scheduleFlush</a></li><li><a href="global.html#score">score</a></li><li><a href="global.html#scoreFlag">scoreFlag</a></li><li><a href="global.html#sendPendingForget">sendPendingForget</a></li><li><a href="global.html#serial">serial</a></li><li><a href="global.html#set">set</a></li><li><a href="global.html#setEverywhere">setEverywhere</a></li><li><a href="global.html#setup">setup</a></li><li><a href="global.html#snapshot">snapshot</a></li><li><a href="global.html#solvePow">solvePow</a></li><li><a href="global.html#state">state</a></li><li><a href="global.html#syncNow">syncNow</a></li><li><a href="global.html#syncOnce">syncOnce</a></li><li><a href="global.html#touch">touch</a></li><li><a href="global.html#unqueue">unqueue</a></li><li><a href="global.html#updateShared">updateShared</a></li><li><a href="global.html#userFromSecret">userFromSecret</a></li><li><a href="global.html#votes">votes</a></li><li><a href="global.html#wipe">wipe</a></li></ul>
 </nav>
 
 <br class="clear">

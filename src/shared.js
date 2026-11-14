@@ -16,8 +16,9 @@
   'use strict';
 
   /**
-   * The two things a channel can be marked as.
-   * @type {ReadonlyArray<'ai'|'pe'>}
+   * The two built-in categories, in the order they occupy in a community entry array.
+   * The full, extendable list is {@link DEFAULT_CATEGORIES} plus whatever a server adds.
+   * @type {ReadonlyArray<string>}
    */
   const FLAGS = Object.freeze(['ai', 'pe']);
 
@@ -47,16 +48,80 @@
   });
 
   /**
-   * Right-click menu actions: the flag changes each one makes and its confirmation text.
-   * @type {Object<string, {changes: Object<string, number>, msg: string}>}
+   * The built-in categories. A sync server can publish more (its operator adds them in
+   * the moderation dashboard); the extension picks them up with the community list.
+   * `id` is what marks and votes are stored under, `label` is the badge text, `title`
+   * completes "Mark as …" in the menu, `color` is the badge and name colour.
+   * @type {ReadonlyArray<{id: string, label: string, title: string, color: string}>}
    */
-  const ACTIONS = Object.freeze({
-    ai:    { changes: { ai: 1 },        msg: 'marked as AI' },
-    pe:    { changes: { pe: 1 },        msg: 'marked as private-equity owned' },
-    notai: { changes: { ai: -1 },       msg: 'marked as not AI' },
-    notpe: { changes: { pe: -1 },       msg: 'marked as not PE-owned' },
-    clear: { changes: { ai: 0, pe: 0 }, msg: 'cleared' },
-  });
+  const DEFAULT_CATEGORIES = Object.freeze([
+    Object.freeze({ id: 'ai', label: 'AI', title: 'AI', color: '#7c3aed' }),
+    Object.freeze({ id: 'pe', label: 'PE', title: 'private-equity owned', color: '#d97706' }),
+  ]);
+
+  /** Most categories a server may add on top of the built-in ones. */
+  const MAX_EXTRA_CATEGORIES = 10;
+  /** Names a category id can't take: they are other fields of a stored mark, or menu words. */
+  const RESERVED_IDS = new Set(['name', 'uc', 't', 'src', 'key', 'clear', 'yes', 'no', 'ai', 'pe']);
+
+  /**
+   * Validates one category from a server or the dashboard.
+   * @param {unknown} c
+   * @returns {?{id: string, label: string, title: string, color: string}} null if unusable
+   */
+  function cleanCategory(c) {
+    if (!c || typeof c !== 'object') return null;
+    const id = typeof c.id === 'string' ? c.id.trim().toLowerCase() : '';
+    // ids starting with "not" would clash with the "not<id>" menu actions
+    if (!/^[a-z][a-z0-9]{1,11}$/.test(id) || id.startsWith('not') || RESERVED_IDS.has(id)) return null;
+    const label = cleanName(c.label).slice(0, 8);
+    const title = cleanName(c.title).slice(0, 40) || label;
+    const color = typeof c.color === 'string' && /^#[0-9a-f]{6}$/i.test(c.color.trim()) ? c.color.trim().toLowerCase() : null;
+    return label && color ? { id, label, title, color } : null;
+  }
+
+  /**
+   * The full category list: the built-in ones first, then the valid extra ones.
+   * @param {unknown} extra categories published by a server
+   * @returns {Array<{id: string, label: string, title: string, color: string}>}
+   */
+  function normalizeCategories(extra) {
+    const out = [...DEFAULT_CATEGORIES];
+    const seen = new Set(out.map(c => c.id));
+    for (const raw of Array.isArray(extra) ? extra : []) {
+      const c = cleanCategory(raw);
+      if (!c || seen.has(c.id) || out.length >= DEFAULT_CATEGORIES.length + MAX_EXTRA_CATEGORIES) continue;
+      seen.add(c.id);
+      out.push(c);
+    }
+    return out;
+  }
+
+  /**
+   * Turns a right-click menu action into flag changes.
+   * Actions are `"<id>"` (yes), `"not<id>"` (disagree) and `"clear"`.
+   * @param {string} action
+   * @param {Array<{id: string, label: string, title: string}>} cats current categories
+   * @returns {?{changes: Object<string, number>, msg: string, label: string}} null for an unknown action
+   */
+  function actionChanges(action, cats) {
+    if (action === 'clear') return { changes: Object.fromEntries(cats.map(c => [c.id, 0])), msg: 'cleared', label: 'OK' };
+    const yes = cats.find(c => c.id === action);
+    if (yes) return { changes: { [yes.id]: 1 }, msg: `marked as ${yes.title}`, label: yes.label };
+    const no = typeof action === 'string' && action.startsWith('not') ? cats.find(c => c.id === action.slice(3)) : null;
+    return no ? { changes: { [no.id]: -1 }, msg: `marked as not ${no.title}`, label: 'OK' } : null;
+  }
+
+  /**
+   * Checks one extra-category part of a community entry: `{ <id>: [pct, votes] }`.
+   * @param {unknown} e
+   * @returns {boolean}
+   */
+  function isCommunityExtra(e) {
+    if (!e || typeof e !== 'object' || Array.isArray(e)) return false;
+    return Object.entries(e).every(([id, v]) => /^[a-z][a-z0-9]{1,11}$/.test(id) && Array.isArray(v) && v.length === 2 &&
+      v.every(n => Number.isInteger(n) && n >= 0 && n <= 1e9));
+  }
 
   /**
    * The community sync server used unless the user enters another one in settings.
@@ -303,7 +368,8 @@
   }
 
   root.Argus = Object.freeze({
-    FLAGS, MSG, LIMITS, ACTIONS, DEFAULT_SERVER,
+    FLAGS, MSG, LIMITS, DEFAULT_SERVER, DEFAULT_CATEGORIES, MAX_EXTRA_CATEGORIES,
+    cleanCategory, normalizeCategories, actionChanges, isCommunityExtra,
     normalizeKey, isChannelId, keyFromHref, platformOf, labelForKey, nameForKey, urlForKey, siteKey, val, cleanName, serverBase, queueKey,
     isCommunityEntry, toHex, sha256hex, zeroBits,
   });

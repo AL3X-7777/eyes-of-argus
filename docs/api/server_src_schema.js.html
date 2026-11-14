@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>JSDoc: Source: server/src/schema.js</title>
+
+    <script src="scripts/prettify/prettify.js"> </script>
+    <script src="scripts/prettify/lang-css.js"> </script>
+    <!--[if lt IE 9]>
+      <script src="//html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+    <link type="text/css" rel="stylesheet" href="styles/prettify-tomorrow.css">
+    <link type="text/css" rel="stylesheet" href="styles/jsdoc-default.css">
+</head>
+
+<body>
+
+<div id="main">
+
+    <h1 class="page-title">Source: server/src/schema.js</h1>
+
+    
+
+
+
+    
+    <section>
+        <article>
+            <pre class="prettyprint source linenums"><code>/**
+ * @file Database layout checks and the automatic upgrade from version 1 (v0.5) to
+ * version 2 (extendable categories, dashboard rules). Runs inside the Worker, so
+ * deploying the new code is all an existing server needs.
+ */
+import { A, cleanRules } from './lib.js';
+
+/** Statements that turn a version 1 database into version 2 (one transaction). */
+const UPGRADE_V2 = [
+  'CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v INTEGER NOT NULL)',
+  // votes: same data, without the old "flag must be ai or pe" check
+  `CREATE TABLE votes_v2 (user_id TEXT NOT NULL, channel_key TEXT NOT NULL, flag TEXT NOT NULL,
+     value INTEGER NOT NULL CHECK (value IN (-1, 1)), updated_at INTEGER NOT NULL, PRIMARY KEY (user_id, channel_key, flag))`,
+  'INSERT INTO votes_v2 SELECT user_id, channel_key, flag, value, updated_at FROM votes',
+  'DROP TABLE votes',
+  'ALTER TABLE votes_v2 RENAME TO votes',
+  'CREATE INDEX IF NOT EXISTS votes_by_channel ON votes (channel_key)',
+  // overrides: one row per category instead of one column per category
+  `CREATE TABLE overrides_v2 (key TEXT NOT NULL, flag TEXT NOT NULL, value INTEGER NOT NULL CHECK (value IN (0, 1)),
+     note TEXT, PRIMARY KEY (key, flag))`,
+  "INSERT INTO overrides_v2 SELECT key, 'ai', ai, note FROM overrides WHERE ai IN (0, 1)",
+  "INSERT INTO overrides_v2 SELECT key, 'pe', pe, note FROM overrides WHERE pe IN (0, 1)",
+  'DROP TABLE overrides',
+  'ALTER TABLE overrides_v2 RENAME TO overrides',
+  // channels only holds results calculated from the votes: rebuild it and recount everything
+  'DROP TABLE channels',
+  `CREATE TABLE channels (key TEXT PRIMARY KEY, name TEXT, entry TEXT, extra TEXT, tally TEXT,
+     votes INTEGER NOT NULL DEFAULT 0, shown INTEGER NOT NULL DEFAULT 0, dirty INTEGER NOT NULL DEFAULT 1,
+     recheck_at INTEGER NOT NULL DEFAULT 0, rev INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL DEFAULT 0)`,
+  'CREATE INDEX channels_dirty ON channels (dirty) WHERE dirty = 1',
+  'CREATE INDEX channels_recheck ON channels (recheck_at) WHERE recheck_at > 0',
+  'CREATE INDEX channels_shown ON channels (key) WHERE shown = 1',
+  'INSERT OR IGNORE INTO channels (key, dirty, rev) SELECT DISTINCT channel_key, 1, 1 FROM votes',
+  'INSERT OR IGNORE INTO channels (key, dirty, rev) SELECT DISTINCT key, 1, 1 FROM overrides',
+  `CREATE TABLE IF NOT EXISTS categories (id TEXT PRIMARY KEY, label TEXT NOT NULL, title TEXT NOT NULL,
+     color TEXT NOT NULL, pos INTEGER NOT NULL DEFAULT 0)`,
+  'CREATE TABLE IF NOT EXISTS settings (k TEXT PRIMARY KEY, v TEXT NOT NULL)',
+  "INSERT OR REPLACE INTO meta (k, v) VALUES ('schema', 2)",
+  "INSERT OR REPLACE INTO meta (k, v) VALUES ('stale', 1)",
+];
+
+let checked = false;
+
+/**
+ * Makes sure the database has the current layout, upgrading an older one in place.
+ * Costs one small query the first time each Worker instance handles a request.
+ * @param {Object} env
+ */
+export async function ensureSchema(env) {
+  if (checked) return;
+  let version = 0;
+  try {
+    version = (await env.DB.prepare("SELECT v FROM meta WHERE k = 'schema'").first())?.v || 1;
+  } catch { version = 1; } // no meta table yet: a version 1 database
+  if (version &lt; 2) await env.DB.batch(UPGRADE_V2.map(sql => env.DB.prepare(sql)));
+  checked = true;
+}
+
+let cache = null;
+
+/**
+ * The vote rules and the category list (cached for 30 seconds per Worker instance).
+ * @param {Object} env
+ * @param {boolean} [fresh] skip the cache (after a change in the dashboard)
+ * @returns {Promise&lt;{rules: Object, cats: Array&lt;Object>, ids: string[], extra: Array&lt;Object>}>}
+ *   `cats` = built-in plus added categories, `ids` = their ids, `extra` = only the added ones
+ */
+export async function loadState(env, fresh) {
+  if (!fresh &amp;&amp; cache &amp;&amp; Date.now() - cache.at &lt; 30000) return cache.state;
+  const [settings, categories] = await env.DB.batch([
+    env.DB.prepare('SELECT k, v FROM settings'),
+    env.DB.prepare('SELECT id, label, title, color FROM categories ORDER BY pos, id'),
+  ]);
+  const cats = A.normalizeCategories(categories.results);
+  const state = {
+    rules: cleanRules(Object.fromEntries(settings.results.map(r => [r.k, r.v]))),
+    cats,
+    ids: cats.map(c => c.id),
+    extra: cats.slice(A.DEFAULT_CATEGORIES.length),
+  };
+  cache = { at: Date.now(), state };
+  return state;
+}
+</code></pre>
+        </article>
+    </section>
+
+
+
+
+</div>
+
+<nav>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="HttpError.html">HttpError</a></li></ul><h3>Global</h3><ul><li><a href="global.html#A">A</a></li><li><a href="global.html#CACHE_KEY">CACHE_KEY</a></li><li><a href="global.html#CACHE_SECONDS">CACHE_SECONDS</a></li><li><a href="global.html#CORS_GET">CORS_GET</a></li><li><a href="global.html#DAY">DAY</a></li><li><a href="global.html#EVERYWHERE">EVERYWHERE</a></li><li><a href="global.html#FROM_TABS">FROM_TABS</a></li><li><a href="global.html#HANDLERS">HANDLERS</a></li><li><a href="global.html#IMPORT">IMPORT</a></li><li><a href="global.html#MARK">MARK</a></li><li><a href="global.html#MAX_BATCH">MAX_BATCH</a></li><li><a href="global.html#MAX_BODY">MAX_BODY</a></li><li><a href="global.html#MAX_NAME">MAX_NAME</a></li><li><a href="global.html#MENU">MENU</a></li><li><a href="global.html#MENU_OTHER">MENU_OTHER</a></li><li><a href="global.html#POW_MAX_BITS">POW_MAX_BITS</a></li><li><a href="global.html#RULE_DEFAULTS">RULE_DEFAULTS</a></li><li><a href="global.html#SITES">SITES</a></li><li><a href="global.html#SYNC_CONFIG">SYNC_CONFIG</a></li><li><a href="global.html#SYNC_NOW">SYNC_NOW</a></li><li><a href="global.html#UPDATE_LIST">UPDATE_LIST</a></li><li><a href="global.html#UPGRADE_V2">UPGRADE_V2</a></li><li><a href="global.html#WIPE">WIPE</a></li><li><a href="global.html#admin">admin</a></li><li><a href="global.html#allow">allow</a></li><li><a href="global.html#applyMark">applyMark</a></li><li><a href="global.html#buildMenus">buildMenus</a></li><li><a href="global.html#catIds">catIds</a></li><li><a href="global.html#cfg">cfg</a></li><li><a href="global.html#chunks">chunks</a></li><li><a href="global.html#cleanRules">cleanRules</a></li><li><a href="global.html#configureSync">configureSync</a></li><li><a href="global.html#dirtyAll">dirtyAll</a></li><li><a href="global.html#dirtyUserChannels">dirtyUserChannels</a></li><li><a href="global.html#ensureIdentity">ensureIdentity</a></li><li><a href="global.html#ensureSchema">ensureSchema</a></li><li><a href="global.html#expandV6">expandV6</a></li><li><a href="global.html#fetchCommunity">fetchCommunity</a></li><li><a href="global.html#flash">flash</a></li><li><a href="global.html#flushQueue">flushQueue</a></li><li><a href="global.html#forHost">forHost</a></li><li><a href="global.html#forget">forget</a></li><li><a href="global.html#get">get</a></li><li><a href="global.html#getCats">getCats</a></li><li><a href="global.html#hasOpinion">hasOpinion</a></li><li><a href="global.html#importData">importData</a></li><li><a href="global.html#json">json</a></li><li><a href="global.html#list">list</a></li><li><a href="global.html#loadState">loadState</a></li><li><a href="global.html#markFromUrl">markFromUrl</a></li><li><a href="global.html#netHash">netHash</a></li><li><a href="global.html#netOf">netOf</a></li><li><a href="global.html#normalizeShared">normalizeShared</a></li><li><a href="global.html#num">num</a></li><li><a href="global.html#originAllowed">originAllowed</a></li><li><a href="global.html#page">page</a></li><li><a href="global.html#post">post</a></li><li><a href="global.html#publish">publish</a></li><li><a href="global.html#queueVotes">queueVotes</a></li><li><a href="global.html#readJson">readJson</a></li><li><a href="global.html#readMark">readMark</a></li><li><a href="global.html#rebuild">rebuild</a></li><li><a href="global.html#register">register</a></li><li><a href="global.html#safeEqual">safeEqual</a></li><li><a href="global.html#scheduleFlush">scheduleFlush</a></li><li><a href="global.html#score">score</a></li><li><a href="global.html#scoreFlag">scoreFlag</a></li><li><a href="global.html#sendPendingForget">sendPendingForget</a></li><li><a href="global.html#serial">serial</a></li><li><a href="global.html#set">set</a></li><li><a href="global.html#setEverywhere">setEverywhere</a></li><li><a href="global.html#setup">setup</a></li><li><a href="global.html#snapshot">snapshot</a></li><li><a href="global.html#solvePow">solvePow</a></li><li><a href="global.html#state">state</a></li><li><a href="global.html#syncNow">syncNow</a></li><li><a href="global.html#syncOnce">syncOnce</a></li><li><a href="global.html#touch">touch</a></li><li><a href="global.html#unqueue">unqueue</a></li><li><a href="global.html#updateShared">updateShared</a></li><li><a href="global.html#userFromSecret">userFromSecret</a></li><li><a href="global.html#votes">votes</a></li><li><a href="global.html#wipe">wipe</a></li></ul>
+</nav>
+
+<br class="clear">
+
+<footer>
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.5</a>
+</footer>
+
+<script> prettyPrint(); </script>
+<script src="scripts/linenumber.js"> </script>
+</body>
+</html>

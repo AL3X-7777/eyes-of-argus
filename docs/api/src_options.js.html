@@ -42,13 +42,15 @@
 
   const api = globalThis.browser ?? globalThis.chrome;
   const A = globalThis.Argus;
-  const { FLAGS, MSG } = A;
+  const { MSG } = A;
   const $ = s => document.querySelector(s);
   const DEFAULTS = { badges: true, tint: true, dim: false };
   /** Firefox asks separately for permission to send data (data_collection_permissions). */
   const IS_FIREFOX = typeof api.runtime.getBrowserInfo === 'function';
 
   let marks = {};
+  /** Categories: the built-in ones plus those the sync server added. */
+  let cats = A.normalizeCategories([]);
   let syncCfg = { enabled: false, server: '' };
 
   /**
@@ -129,7 +131,16 @@
     const q = $('#search').value.trim().toLowerCase();
     const tbody = $('#marks tbody');
     tbody.textContent = '';
-    const all = Object.entries(marks).filter(([, v]) => A.val(v.ai) || A.val(v.pe));
+    const all = Object.entries(marks).filter(([, v]) => cats.some(c => A.val(v[c.id])));
+
+    // one column per category
+    const head = $('#marks thead tr');
+    head.textContent = '';
+    for (const text of ['Channel / account / site', ...cats.map(c => c.label), '']) {
+      const th = document.createElement('th');
+      th.textContent = text;
+      head.append(th);
+    }
     $('#count').textContent = all.length;
     $('#empty').hidden = all.length > 0;
 
@@ -151,14 +162,16 @@
       td.append(a, k);
       tr.append(td);
 
-      for (const flag of FLAGS) {
+      for (const cat of cats) {
+        const flag = cat.id;
         const c = document.createElement('td');
         const sel = document.createElement('select');
         for (const [value, label] of [['0', '–'], ['1', 'Yes'], ['-1', 'Not']]) sel.add(new Option(label, value));
         const cur = A.val(v[flag]);
         sel.value = String(cur);
         sel.className = `${flag} ${cur > 0 ? 'yes' : cur &lt; 0 ? 'no' : ''}`;
-        sel.setAttribute('aria-label', `${flag === 'ai' ? 'Uses AI' : 'Private-equity owned'}: ${name}`);
+        if (cur > 0) sel.style.borderColor = cat.color;
+        sel.setAttribute('aria-label', `${cat.title}: ${name}`);
         sel.addEventListener('change', () => ask({ type: MSG.MARK, key, changes: { [flag]: Number(sel.value) } }));
         c.append(sel); tr.append(c);
       }
@@ -167,7 +180,7 @@
       const x = document.createElement('button');
       x.className = 'x'; x.textContent = '✕';
       x.setAttribute('aria-label', `Remove mark for ${name}`);
-      x.addEventListener('click', () => ask({ type: MSG.MARK, key, changes: { ai: 0, pe: 0 } }));
+      x.addEventListener('click', () => ask({ type: MSG.MARK, key, changes: Object.fromEntries(cats.map(c => [c.id, 0])) }));
       del.append(x); tr.append(del);
 
       frag.append(tr);
@@ -183,7 +196,7 @@
     const d = await api.storage.local.get(['sync', 'queue', 'syncStatus', 'communityMeta', 'identity', 'pendingForget']);
     syncCfg = { enabled: false, server: '', ...(d.sync || {}) };
     $('#syncEnabled').checked = syncCfg.enabled;
-    if (document.activeElement !== $('#syncServer')) $('#syncServer').value = syncCfg.server;
+    if (document.activeElement !== $('#syncServer')) $('#syncServer').value = syncCfg.server || A.DEFAULT_SERVER;
     $('#syncPill').textContent = syncCfg.enabled ? 'On' : 'Off';
     $('#syncPill').classList.toggle('on', syncCfg.enabled);
     if (!syncCfg.enabled) {
@@ -296,11 +309,13 @@
   function buildExport() {
     const channels = {}, mine = {};
     for (const [k, v] of Object.entries(marks)) {
-      const ai = A.val(v.ai), pe = A.val(v.pe);
-      if (!ai &amp;&amp; !pe) continue;
+      const vals = Object.fromEntries(cats.map(c => [c.id, A.val(v[c.id])]));
+      if (!Object.values(vals).some(Boolean)) continue;
       const name = v.name || k;
-      if (ai > 0 || pe > 0) channels[k] = { ai: ai > 0, pe: pe > 0, name };
-      mine[k] = { ai, pe, name, ...(v.uc ? { uc: v.uc } : {}), ...(v.src ? { src: v.src } : {}) };
+      const yes = cats.filter(c => vals[c.id] > 0);
+      // ai and pe are always written, so files stay readable by older versions
+      if (yes.length) channels[k] = { ai: vals.ai > 0, pe: vals.pe > 0, ...Object.fromEntries(yes.map(c => [c.id, true])), name };
+      mine[k] = { ...vals, name, ...(v.uc ? { uc: v.uc } : {}), ...(v.src ? { src: v.src } : {}) };
     }
     return { app: 'eyes-of-argus', version: 2, exported: new Date().toISOString(), channels, mine };
   }
@@ -345,15 +360,18 @@
 
   api.storage.onChanged.addListener((ch, area) => {
     if (area !== 'local') return;
-    if (ch.marks) { marks = ch.marks.newValue || {}; render(); }
+    if (ch.categories) cats = A.normalizeCategories(ch.categories.newValue);
+    if (ch.marks) marks = ch.marks.newValue || {};
+    if (ch.marks || ch.categories) render();
     if (ch.sharedList || ch.listUrl) api.storage.local.get(['sharedList', 'listUrl']).then(d => showListInfo(d.sharedList, d.listUrl));
     if (ch.sync || ch.queue || ch.syncStatus || ch.communityMeta || ch.identity || ch.pendingForget) renderSync();
   });
 
   (async () => {
     await loadSettings();
-    const d = await api.storage.local.get(['marks', 'sharedList', 'listUrl', 'everywhere']);
+    const d = await api.storage.local.get(['marks', 'sharedList', 'listUrl', 'everywhere', 'categories']);
     marks = d.marks || {};
+    cats = A.normalizeCategories(d.categories);
     $('#everywhere').checked = !!d.everywhere;
     $('#listUrl').value = d.listUrl || '';
     showListInfo(d.sharedList, d.listUrl);
@@ -375,7 +393,7 @@
 </div>
 
 <nav>
-    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="HttpError.html">HttpError</a></li></ul><h3>Global</h3><ul><li><a href="global.html#A">A</a></li><li><a href="global.html#CACHE_KEY">CACHE_KEY</a></li><li><a href="global.html#CACHE_SECONDS">CACHE_SECONDS</a></li><li><a href="global.html#CORS_GET">CORS_GET</a></li><li><a href="global.html#DAY">DAY</a></li><li><a href="global.html#EVERYWHERE">EVERYWHERE</a></li><li><a href="global.html#FROM_TABS">FROM_TABS</a></li><li><a href="global.html#HANDLERS">HANDLERS</a></li><li><a href="global.html#IMPORT">IMPORT</a></li><li><a href="global.html#MARK">MARK</a></li><li><a href="global.html#MAX_BATCH">MAX_BATCH</a></li><li><a href="global.html#MAX_BODY">MAX_BODY</a></li><li><a href="global.html#MAX_NAME">MAX_NAME</a></li><li><a href="global.html#MENU">MENU</a></li><li><a href="global.html#POW_MAX_BITS">POW_MAX_BITS</a></li><li><a href="global.html#SITES">SITES</a></li><li><a href="global.html#SYNC_CONFIG">SYNC_CONFIG</a></li><li><a href="global.html#SYNC_NOW">SYNC_NOW</a></li><li><a href="global.html#UPDATE_LIST">UPDATE_LIST</a></li><li><a href="global.html#WIPE">WIPE</a></li><li><a href="global.html#admin">admin</a></li><li><a href="global.html#allow">allow</a></li><li><a href="global.html#applyMark">applyMark</a></li><li><a href="global.html#buildMenus">buildMenus</a></li><li><a href="global.html#cfg">cfg</a></li><li><a href="global.html#chunks">chunks</a></li><li><a href="global.html#configureSync">configureSync</a></li><li><a href="global.html#dirtyUserChannels">dirtyUserChannels</a></li><li><a href="global.html#ensureIdentity">ensureIdentity</a></li><li><a href="global.html#expandV6">expandV6</a></li><li><a href="global.html#fetchCommunity">fetchCommunity</a></li><li><a href="global.html#flash">flash</a></li><li><a href="global.html#flushQueue">flushQueue</a></li><li><a href="global.html#forHost">forHost</a></li><li><a href="global.html#forget">forget</a></li><li><a href="global.html#get">get</a></li><li><a href="global.html#importData">importData</a></li><li><a href="global.html#json">json</a></li><li><a href="global.html#list">list</a></li><li><a href="global.html#markFromUrl">markFromUrl</a></li><li><a href="global.html#netHash">netHash</a></li><li><a href="global.html#netOf">netOf</a></li><li><a href="global.html#normalizeShared">normalizeShared</a></li><li><a href="global.html#num">num</a></li><li><a href="global.html#originAllowed">originAllowed</a></li><li><a href="global.html#page">page</a></li><li><a href="global.html#post">post</a></li><li><a href="global.html#publish">publish</a></li><li><a href="global.html#queueVotes">queueVotes</a></li><li><a href="global.html#readJson">readJson</a></li><li><a href="global.html#readMark">readMark</a></li><li><a href="global.html#rebuild">rebuild</a></li><li><a href="global.html#register">register</a></li><li><a href="global.html#safeEqual">safeEqual</a></li><li><a href="global.html#scheduleFlush">scheduleFlush</a></li><li><a href="global.html#score">score</a></li><li><a href="global.html#sendPendingForget">sendPendingForget</a></li><li><a href="global.html#serial">serial</a></li><li><a href="global.html#set">set</a></li><li><a href="global.html#setEverywhere">setEverywhere</a></li><li><a href="global.html#setup">setup</a></li><li><a href="global.html#snapshot">snapshot</a></li><li><a href="global.html#solvePow">solvePow</a></li><li><a href="global.html#syncNow">syncNow</a></li><li><a href="global.html#syncOnce">syncOnce</a></li><li><a href="global.html#touch">touch</a></li><li><a href="global.html#unqueue">unqueue</a></li><li><a href="global.html#updateShared">updateShared</a></li><li><a href="global.html#userFromSecret">userFromSecret</a></li><li><a href="global.html#votes">votes</a></li><li><a href="global.html#wipe">wipe</a></li></ul>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="HttpError.html">HttpError</a></li></ul><h3>Global</h3><ul><li><a href="global.html#A">A</a></li><li><a href="global.html#CACHE_KEY">CACHE_KEY</a></li><li><a href="global.html#CACHE_SECONDS">CACHE_SECONDS</a></li><li><a href="global.html#CORS_GET">CORS_GET</a></li><li><a href="global.html#DAY">DAY</a></li><li><a href="global.html#EVERYWHERE">EVERYWHERE</a></li><li><a href="global.html#FROM_TABS">FROM_TABS</a></li><li><a href="global.html#HANDLERS">HANDLERS</a></li><li><a href="global.html#IMPORT">IMPORT</a></li><li><a href="global.html#MARK">MARK</a></li><li><a href="global.html#MAX_BATCH">MAX_BATCH</a></li><li><a href="global.html#MAX_BODY">MAX_BODY</a></li><li><a href="global.html#MAX_NAME">MAX_NAME</a></li><li><a href="global.html#MENU">MENU</a></li><li><a href="global.html#MENU_OTHER">MENU_OTHER</a></li><li><a href="global.html#POW_MAX_BITS">POW_MAX_BITS</a></li><li><a href="global.html#RULE_DEFAULTS">RULE_DEFAULTS</a></li><li><a href="global.html#SITES">SITES</a></li><li><a href="global.html#SYNC_CONFIG">SYNC_CONFIG</a></li><li><a href="global.html#SYNC_NOW">SYNC_NOW</a></li><li><a href="global.html#UPDATE_LIST">UPDATE_LIST</a></li><li><a href="global.html#UPGRADE_V2">UPGRADE_V2</a></li><li><a href="global.html#WIPE">WIPE</a></li><li><a href="global.html#admin">admin</a></li><li><a href="global.html#allow">allow</a></li><li><a href="global.html#applyMark">applyMark</a></li><li><a href="global.html#buildMenus">buildMenus</a></li><li><a href="global.html#catIds">catIds</a></li><li><a href="global.html#cfg">cfg</a></li><li><a href="global.html#chunks">chunks</a></li><li><a href="global.html#cleanRules">cleanRules</a></li><li><a href="global.html#configureSync">configureSync</a></li><li><a href="global.html#dirtyAll">dirtyAll</a></li><li><a href="global.html#dirtyUserChannels">dirtyUserChannels</a></li><li><a href="global.html#ensureIdentity">ensureIdentity</a></li><li><a href="global.html#ensureSchema">ensureSchema</a></li><li><a href="global.html#expandV6">expandV6</a></li><li><a href="global.html#fetchCommunity">fetchCommunity</a></li><li><a href="global.html#flash">flash</a></li><li><a href="global.html#flushQueue">flushQueue</a></li><li><a href="global.html#forHost">forHost</a></li><li><a href="global.html#forget">forget</a></li><li><a href="global.html#get">get</a></li><li><a href="global.html#getCats">getCats</a></li><li><a href="global.html#hasOpinion">hasOpinion</a></li><li><a href="global.html#importData">importData</a></li><li><a href="global.html#json">json</a></li><li><a href="global.html#list">list</a></li><li><a href="global.html#loadState">loadState</a></li><li><a href="global.html#markFromUrl">markFromUrl</a></li><li><a href="global.html#netHash">netHash</a></li><li><a href="global.html#netOf">netOf</a></li><li><a href="global.html#normalizeShared">normalizeShared</a></li><li><a href="global.html#num">num</a></li><li><a href="global.html#originAllowed">originAllowed</a></li><li><a href="global.html#page">page</a></li><li><a href="global.html#post">post</a></li><li><a href="global.html#publish">publish</a></li><li><a href="global.html#queueVotes">queueVotes</a></li><li><a href="global.html#readJson">readJson</a></li><li><a href="global.html#readMark">readMark</a></li><li><a href="global.html#rebuild">rebuild</a></li><li><a href="global.html#register">register</a></li><li><a href="global.html#safeEqual">safeEqual</a></li><li><a href="global.html#scheduleFlush">scheduleFlush</a></li><li><a href="global.html#score">score</a></li><li><a href="global.html#scoreFlag">scoreFlag</a></li><li><a href="global.html#sendPendingForget">sendPendingForget</a></li><li><a href="global.html#serial">serial</a></li><li><a href="global.html#set">set</a></li><li><a href="global.html#setEverywhere">setEverywhere</a></li><li><a href="global.html#setup">setup</a></li><li><a href="global.html#snapshot">snapshot</a></li><li><a href="global.html#solvePow">solvePow</a></li><li><a href="global.html#state">state</a></li><li><a href="global.html#syncNow">syncNow</a></li><li><a href="global.html#syncOnce">syncOnce</a></li><li><a href="global.html#touch">touch</a></li><li><a href="global.html#unqueue">unqueue</a></li><li><a href="global.html#updateShared">updateShared</a></li><li><a href="global.html#userFromSecret">userFromSecret</a></li><li><a href="global.html#votes">votes</a></li><li><a href="global.html#wipe">wipe</a></li></ul>
 </nav>
 
 <br class="clear">

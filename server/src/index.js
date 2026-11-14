@@ -14,11 +14,13 @@
  *
  * Abuse resistance (see server/README.md, "Threat model"): POSTs only from extensions
  * or non-browser clients; daily limits per install and per network (IPv6 grouped by
- * /56); new installs carry no weight for their first days; at most `MAX_PER_NET`
- * votes per channel count from installs registered on the same network.
+ * /56); at most `maxPerNet` votes per channel count from installs registered on the
+ * same network; an optional warm-up period for new installs. The vote rules themselves
+ * are set in the moderation dashboard (schema.js `loadState`).
  */
 import { A, DAY, cfg, netOf, originAllowed, readJson, chunks, score, json } from './lib.js';
 import { admin } from './admin.js';
+import { ensureSchema, loadState } from './schema.js';
 
 const SNAPSHOT = 'snapshot.json';
 /** Fixed edge-cache key for the snapshot, so a rebuild can invalidate it. */
@@ -108,6 +110,7 @@ async function register(req, env, body) {
 /** `POST /votes` (with `replace: true`, first deletes all of this install's votes) */
 async function votes(req, env, body) {
   const c = cfg(env);
+  const { ids } = await loadState(env);
   const replace = body?.replace === true;
   if (!body || !Array.isArray(body.votes) || body.votes.length > A.LIMITS.MAX_BATCH || (!body.votes.length && !replace)) {
     return json({ error: 'bad request' }, 400);
@@ -118,7 +121,7 @@ async function votes(req, env, body) {
   const clean = [];
   for (const v of body.votes) {
     const k = A.normalizeKey(v?.k);
-    if (!k || !A.FLAGS.includes(v?.f) || ![-1, 0, 1].includes(v?.v)) continue;
+    if (!k || !ids.includes(v?.f) || ![-1, 0, 1].includes(v?.v)) continue;
     clean.push({ k, f: v.f, v: v.v, name: A.cleanName(v.name) || null });
   }
   if (!clean.length && !replace) return json({ error: 'no valid votes' }, 400);
@@ -203,6 +206,7 @@ async function snapshot(req, env, ctx) {
  */
 async function rebuild(env) {
   const c = cfg(env);
+  const { rules, ids, extra } = await loadState(env);
   const now = Date.now();
   // Yesterday's rate-limit counters: cleaned once a day (the first run after midnight UTC)
   if (now % DAY < 16 * 60e3) await env.DB.prepare('DELETE FROM limits WHERE day < ?').bind(today()).run();
@@ -217,6 +221,7 @@ async function rebuild(env) {
     todo = todo.concat(due);
   }
 
+  const warmupMs = rules.warmupDays * DAY;
   let listChanged = false;
   for (const part of chunks(todo, 90)) {
     const keys = part.map(r => r.key);
@@ -234,30 +239,31 @@ async function rebuild(env) {
                 SUM(CASE WHEN val > 0 AND rn <= ?2 THEN w ELSE 0 END) AS up,
                 SUM(CASE WHEN val < 0 AND rn <= ?2 THEN w ELSE 0 END) AS down
          FROM ranked GROUP BY k, f`
-      ).bind(now - c.warmupMs, c.maxPerNet, ...keys),
-      env.DB.prepare(`SELECT key, ai, pe FROM overrides WHERE key IN (${plain})`).bind(...keys),
-      env.DB.prepare(`SELECT key, entry FROM channels WHERE key IN (${plain})`).bind(...keys),
+      ).bind(now - warmupMs, rules.maxPerNet, ...keys),
+      env.DB.prepare(`SELECT key, flag, value FROM overrides WHERE key IN (${plain})`).bind(...keys),
+      env.DB.prepare(`SELECT key, entry, extra FROM channels WHERE key IN (${plain})`).bind(...keys),
     ]);
-    const t = {};
+    const t = {}, ov = {};
     for (const r of tallies.results) (t[r.k] ||= {})[r.f] = r;
-    const ov = Object.fromEntries(overrides.results.map(r => [r.key, r]));
-    const old = Object.fromEntries(rows.results.map(r => [r.key, r.entry]));
+    for (const r of overrides.results) (ov[r.key] ||= {})[r.flag] = r.value;
+    const old = Object.fromEntries(rows.results.map(r => [r.key, (r.entry || '') + '|' + (r.extra || '')]));
 
     const stmts = [];
     for (const { key, rev } of part) {
-      const s = score(t[key], ov[key], c);
+      const s = score(t[key], ov[key], rules, ids);
       const entry = s.entry ? JSON.stringify(s.entry) : null;
-      if (entry !== (old[key] ?? null)) listChanged = true;
+      const more = s.extra ? JSON.stringify(s.extra) : null;
+      if ((entry || '') + '|' + (more || '') !== (old[key] ?? '|')) listChanged = true;
       // Votes from installs still in their warm-up count later: note when the first of
       // them matures, so the channel is recounted then (without staying in the queue).
-      const born = A.FLAGS.map(f => t[key]?.[f]?.young).filter(Boolean);
-      const recheck = born.length ? Math.min(...born) + c.warmupMs + 1 : 0;
+      const born = Object.values(t[key] || {}).map(r => r.young).filter(Boolean);
+      const recheck = born.length ? Math.min(...born) + warmupMs + 1 : 0;
       stmts.push(s.total === 0 && !ov[key]
         ? env.DB.prepare('DELETE FROM channels WHERE key = ? AND rev = ?').bind(key, rev)
         : env.DB.prepare(
-          `UPDATE channels SET ai_pct = ?, ai_n = ?, pe_pct = ?, pe_n = ?, entry = ?, dirty = 0, recheck_at = ?, updated_at = ?
+          `UPDATE channels SET entry = ?, extra = ?, tally = ?, votes = ?, shown = ?, dirty = 0, recheck_at = ?, updated_at = ?
            WHERE key = ? AND rev = ?`
-        ).bind(s.raw.ai.pct, s.raw.ai.n, s.raw.pe.pct, s.raw.pe.n, entry, recheck, now, key, rev));
+        ).bind(entry, more, JSON.stringify(s.tally), s.total, entry || more ? 1 : 0, recheck, now, key, rev));
     }
     if (listChanged) stmts.push(env.DB.prepare("INSERT OR REPLACE INTO meta (k, v) VALUES ('stale', 1)"));
     await env.DB.batch(stmts);
@@ -265,22 +271,29 @@ async function rebuild(env) {
 
   const stale = listChanged || (await env.DB.prepare("SELECT v FROM meta WHERE k = 'stale'").first())?.v === 1;
   let total;
-  if (stale) total = await publish(env, c, now);
+  if (stale) total = await publish(env, rules, extra, now);
   return { changed: todo.length, ...(total === undefined ? {} : { total }) };
 }
 
 /**
  * Writes the community list to KV from the channel rows. The JSON is assembled from the
  * stored entry strings without re-parsing them (CPU time is limited to 10 ms on the free plan).
+ *
+ * Layout: `c` holds the AI/PE entries in the format every extension version reads;
+ * `x` holds the entries of added categories and `cats` their definitions (older
+ * extensions ignore both).
+ *
  * @param {Object} env
- * @param {Object} c config
+ * @param {Object} rules vote rules
+ * @param {Array<Object>} extra categories added in the dashboard
  * @param {number} now
  * @returns {Promise<number>} number of channels in the list
  */
-async function publish(env, c, now) {
-  const { results } = await env.DB.prepare('SELECT key, entry FROM channels WHERE entry IS NOT NULL').all();
-  const body = `{"v":1,"generated":${now},"min":{"votes":${c.minVotes},"agree":${c.minAgree}},"c":{${
-    results.map(r => `${JSON.stringify(r.key)}:${r.entry}`).join(',')}}}`;
+async function publish(env, rules, extra, now) {
+  const { results } = await env.DB.prepare('SELECT key, entry, extra FROM channels WHERE shown = 1').all();
+  const part = col => results.filter(r => r[col]).map(r => `${JSON.stringify(r.key)}:${r[col]}`).join(',');
+  const body = `{"v":1,"generated":${now},"min":{"votes":${rules.minVotes},"factor":${rules.notFactor}},` +
+    `"cats":${JSON.stringify(extra)},"c":{${part('entry')}},"x":{${part('extra')}}}`;
   await env.KV.put(SNAPSHOT, body, { metadata: { etag: `"g${now}"` } });
   await env.DB.prepare("INSERT OR REPLACE INTO meta (k, v) VALUES ('stale', 0)").run();
   await globalThis.caches?.default.delete(new Request(CACHE_KEY));
@@ -300,9 +313,11 @@ export default {
     try {
       if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS_GET });
       if (req.method === 'GET' && pathname === '/snapshot.json') return await snapshot(req, env, ctx);
+      if (req.method === 'GET' && pathname === '/admin') return await admin(req, env, pathname, rebuild);
+      await ensureSchema(env); // upgrades a database created by an older version
       if (req.method === 'GET' && pathname === '/config') {
-        const c = cfg(env);
-        return json({ powBits: c.powBits, minVotes: c.minVotes, minAgree: c.minAgree, maxBatch: A.LIMITS.MAX_BATCH }, 200, CORS_GET);
+        const { rules } = await loadState(env);
+        return json({ powBits: cfg(env).powBits, minVotes: rules.minVotes, notFactor: rules.notFactor, maxBatch: A.LIMITS.MAX_BATCH }, 200, CORS_GET);
       }
       if (pathname === '/admin' || pathname.startsWith('/admin/')) return await admin(req, env, pathname, rebuild);
       if (req.method !== 'POST') return json({ error: 'not found' }, 404);
@@ -320,6 +335,6 @@ export default {
 
   /** Cron trigger: recount changed channels. */
   async scheduled(_event, env, ctx) {
-    ctx.waitUntil(rebuild(env));
+    ctx.waitUntil(ensureSchema(env).then(() => rebuild(env)));
   },
 };

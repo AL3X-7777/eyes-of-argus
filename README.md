@@ -10,7 +10,7 @@ Optional community sync through a tiny self-hosted server (see `server/README.md
 
 **Firefox (for testing)**
 1. Open `about:debugging#/runtime/this-firefox`
-2. Click **Load Temporary Add-on…** and pick `eyes-of-argus-firefox-0.5.1.zip`
+2. Click **Load Temporary Add-on…** and pick `eyes-of-argus-firefox-0.6.0.zip`
 3. Reload any open YouTube tabs
 
 Temporary add-ons disappear when Firefox restarts. To keep it installed, upload the zip to
@@ -18,7 +18,7 @@ https://addons.mozilla.org/developers/ as **"On your own"** (unlisted). Signing 
 get a signed `.xpi` you can install permanently.
 
 **Chrome / Edge / Brave / Opera**
-1. Unzip `eyes-of-argus-chrome-0.5.1.zip` into a folder
+1. Unzip `eyes-of-argus-chrome-0.6.0.zip` into a folder
 2. Open `chrome://extensions` (or `edge://extensions`), turn on **Developer mode**
 3. Click **Load unpacked** and pick the folder
 
@@ -55,7 +55,7 @@ Edit files in `src/`, then run `python build.py`. Output goes to `dist/`.
 ```
 npm install && (cd server && npm install)
 python build.py      # builds dist/
-npm test             # 73 tests, including a local sync server
+npm test             # 78 tests, including a local sync server
 npm run test:browser # loads the Chrome build into a real Chrome
 npm run lint         # ESLint + Mozilla's add-on linter
 npm run docs         # API reference in docs/api

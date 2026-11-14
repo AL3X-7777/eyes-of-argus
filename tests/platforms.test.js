@@ -151,3 +151,57 @@ test('"badges on every website" registers and unregisters the content script', a
   bg.api.permissions.contains = async () => false;
   assert.equal((await bg.ask({ type: 'argus-everywhere', on: true })).ok, false, 'refused without the permission');
 });
+
+test('added categories: menu actions, badges with their own label and colour, three-way split, export', async () => {
+  const categories = [{ id: 'sponsored', label: 'AD', title: 'sponsored content', color: '#16a34a' }];
+  const s = fakeStorage({
+    categories, sync: { enabled: true, server: 'https://x.test' },
+    community: { c: { '@b': [100, 3, 0, 0, ''] }, x: { '@b': { sponsored: [100, 2] }, '@c': { sponsored: [80, 5], bogus: [100, 9] } } },
+  });
+  const p = page(`<ytd-rich-item-renderer><a href="/@a" id="a">A</a></ytd-rich-item-renderer>
+    <ytd-rich-item-renderer><a href="/@b" id="b">B</a></ytd-rich-item-renderer><ytd-rich-item-renderer><a href="/@c" id="c">C</a></ytd-rich-item-renderer>`, s);
+  await wait(50); // the page reads the category list from storage first
+  await p.menu('a', 'sponsored');
+  await p.menu('a', 'pe');
+  await p.menu('a', 'ai');
+  assert.deepEqual([s.data.marks['@a'].ai, s.data.marks['@a'].pe, s.data.marks['@a'].sponsored], [1, 1, 1]);
+  assert.ok(s.data.queue['@a|sponsored'], 'votes for added categories are queued');
+  await wait(300);
+  assert.equal(p.$('a').dataset.argus, 'ai pe sponsored');
+  assert.equal(p.$('a').dataset.argusLabel, 'AI · PE · AD');
+  assert.match(p.$('a').style.getPropertyValue('--argus-bg'), /#7c3aed 0\.00% 33\.33%, #d97706 33\.33% 66\.67%, #16a34a 66\.67% 100\.00%/);
+  assert.equal(p.$('b').dataset.argus, 'ai sponsored', 'community marks of both kinds combine');
+  assert.match(p.$('b').title, /AI 100% of 3 votes · AD 100% of 2 votes/);
+  assert.equal(p.$('c').dataset.argus, 'sponsored');
+  assert.equal(p.$('c').style.getPropertyValue('--argus-color'), '#16a34a');
+
+  await p.menu('a', 'notsponsored');
+  assert.equal(s.data.marks['@a'].sponsored, -1);
+  await p.menu('a', 'clear');
+  assert.equal(s.data.marks['@a'], undefined);
+  await p.menu('a', 'unknowncat');
+  assert.equal(s.data.marks['@a'], undefined, 'unknown categories are ignored');
+  await wait(300);
+  assert.equal(p.$('a').dataset.argus, undefined);
+  assert.equal(p.$('a').dataset.argusLabel, undefined);
+  assert.equal(p.$('a').style.getPropertyValue('--argus-bg'), '');
+});
+
+test('the menu lists every category, and the list from the server replaces the stored one', async () => {
+  const s = fakeStorage({ categories: [{ id: 'sponsored', label: 'AD', title: 'sponsored content', color: '#16a34a' }] });
+  const bg = loadBackground(s);
+  const titles = [];
+  bg.api.contextMenus.create = o => titles.push(o.title || o.type);
+  bg.api.runtime.onInstalled.fns[0]();
+  await wait(60);
+  assert.deepEqual(titles, ['Eyes of Argus', 'Mark as AI', 'Mark as private-equity owned', 'Mark as sponsored content', 'separator',
+    'Not AI (disagree)', 'Not private-equity owned (disagree)', 'Not sponsored content (disagree)', 'Clear', 'separator', 'Settings', 'Help']);
+  // hostile category data from a server is dropped
+  bg.ctx.fetch = async () => new Response(JSON.stringify({ c: {}, x: { '@k': { spam: [100, 1] }, '@bad': { '<img>': [1, 1] } },
+    cats: [{ id: 'spam', label: 'SPAM', title: 'spam', color: '#dc2626' }, { id: 'ai', label: 'HACK', color: '#000000' }, { id: 'name', label: 'x', color: '#000000' },
+      { id: 'evil', label: '<b>x</b>', color: 'url(x)' }] }), { headers: { etag: '"1"' } });
+  await s.local.set({ sync: { enabled: true, server: 'https://x.test' } });
+  await bg.ask({ type: 'argus-sync-now' });
+  assert.deepEqual(s.data.categories.map(c => c.id), ['spam']);
+  assert.deepEqual(Object.keys(s.data.community.x), ['@k']);
+});

@@ -19,14 +19,15 @@
  * Storage keys (all in `storage.local`):
  * | key            | written by  | content |
  * |----------------|-------------|---------|
- * | marks          | background  | `{ [key]: {ai, pe, name, uc?, t} }` with ai/pe ∈ {1, -1, 0} |
+ * | marks          | background  | `{ [key]: {ai, pe, <other categories>, name, uc?, t} }` with each category ∈ {1, -1, 0} |
  * | queue          | background  | `{ ["key|flag"]: {k, f, v, name, t} }` votes not yet sent |
  * | syncReplace    | background  | true → next upload replaces all your votes on the server |
  * | sync           | background  | `{enabled, server}` |
  * | identity       | background  | `{secret, id, registeredAt}` anonymous install identity |
  * | powProgress    | background  | `{id, bits, next}` so a stopped worker resumes the puzzle |
  * | pendingForget  | background  | `{server, secret}` "delete my votes" still to be sent |
- * | community      | background  | `{c: {[key]: entry}}` only rewritten when the list changed |
+ * | community      | background  | `{c: {[key]: entry}, x: {[key]: {[category]: [pct, votes]}}}` only rewritten when the list changed |
+ * | categories     | background  | categories the sync server added (the built-in ones are in shared.js) |
  * | communityMeta  | background  | `{count, etag, generated, checked}` |
  * | syncStatus     | background  | result of the last sync |
  * | sharedList     | background  | `{channels, count, updated}` |
@@ -41,7 +42,7 @@ if (typeof importScripts === 'function' && !globalThis.Argus) importScripts('sha
 
 const api = globalThis.browser ?? globalThis.chrome;
 const A = globalThis.Argus;
-const { FLAGS, MSG, LIMITS } = A;
+const { MSG, LIMITS } = A;
 
 /** Sites with a built-in adapter: the list the content script always runs on (see build.py). */
 const SITES = api.runtime.getManifest?.().content_scripts?.[0]?.matches || ['*://*.youtube.com/*'];
@@ -81,11 +82,33 @@ const set = obj => api.storage.local.set(obj);
 /**
  * Normalizes one stored mark to the current format (tri-state numbers).
  * @param {Object|undefined} m
- * @returns {{ai: number, pe: number, name: string, uc: string, t: number}}
+ * @param {string[]} ids category ids
+ * @returns {Object} the mark with every category as 1, -1 or 0, plus `name`, `uc`, `t`, `src`
  */
-function readMark(m) {
-  return { ...(m || {}), ai: A.val(m?.ai), pe: A.val(m?.pe) };
+function readMark(m, ids) {
+  const out = { ...(m || {}) };
+  for (const f of ids) out[f] = A.val(m?.[f]);
+  return out;
 }
+
+/**
+ * @param {Object} m normalized mark
+ * @param {string[]} ids category ids
+ * @returns {boolean} true if the mark says anything at all
+ */
+const hasOpinion = (m, ids) => ids.some(f => m[f]);
+
+/**
+ * The current categories: the built-in ones plus those the sync server published.
+ * @returns {Promise<Array<{id: string, label: string, title: string, color: string}>>}
+ */
+async function getCats() {
+  const { categories } = await get('categories');
+  return A.normalizeCategories(categories);
+}
+
+/** @returns {Promise<string[]>} ids of the current categories */
+const catIds = async () => (await getCats()).map(c => c.id);
 
 /**
  * Adds the votes for the given flags of one mark to `queue` (mutates it).
@@ -118,16 +141,17 @@ function applyMark(msg) {
   return serial(async () => {
     const key = A.normalizeKey(msg.key);
     if (!key) return { ok: false, error: 'invalid channel' };
+    const ids = await catIds();
     const changes = {};
-    for (const f of FLAGS) {
-      if (msg.changes && f in msg.changes) {
+    for (const f of ids) {
+      if (msg.changes && Object.hasOwn(msg.changes, f)) {
         const v = msg.changes[f];
         if (![1, 0, -1].includes(v)) return { ok: false, error: 'invalid value' };
         changes[f] = v;
       }
     }
     const { marks = {}, queue = {}, sync } = await get(['marks', 'queue', 'sync']);
-    const m = readMark(marks[key]);
+    const m = readMark(marks[key], ids);
     const name = A.cleanName(msg.name);
     if (name) m.name = name;
     if (key.startsWith('@') && A.isChannelId(msg.uc)) m.uc = msg.uc;
@@ -136,7 +160,7 @@ function applyMark(msg) {
     Object.assign(m, changes);
     m.t = Date.now();
 
-    if (m.ai || m.pe) marks[key] = m; else delete marks[key];
+    if (hasOpinion(m, ids)) marks[key] = m; else delete marks[key];
     const out = { marks };
     if (sync?.enabled && changed.length) {
       queueVotes(queue, key, m, changed, m.t);
@@ -174,22 +198,23 @@ function importData(msg) {
 
     const { marks = {}, queue = {}, sync } = await get(['marks', 'queue', 'sync']);
     const t = Date.now();
+    const ids = await catIds();
     let count = 0, voted = false;
 
     if (mine) {
       for (const [k, v] of Object.entries(mine)) {
         const key = A.normalizeKey(k);
         if (!key || !v || typeof v !== 'object') continue;
-        const m = readMark(marks[key]);
-        const next = { ai: A.val(v.ai), pe: A.val(v.pe) };
-        const changed = FLAGS.filter(f => next[f] !== m[f]);
+        const m = readMark(marks[key], ids);
+        const next = Object.fromEntries(ids.map(f => [f, A.val(v[f])]));
+        const changed = ids.filter(f => next[f] !== m[f]);
         if (!changed.length) continue;
         Object.assign(m, next, { t });
         const name = A.cleanName(v.name);
         if (name) m.name = name;
         if (key.startsWith('@') && A.isChannelId(v.uc)) m.uc = v.uc;
         if (v.src === 'import') m.src = 'import'; else delete m.src;
-        if (m.ai || m.pe) marks[key] = m; else delete marks[key];
+        if (hasOpinion(m, ids)) marks[key] = m; else delete marks[key];
         if (sync?.enabled && !m.src) { queueVotes(queue, key, m, changed, t); voted = true; }
         count++;
       }
@@ -197,9 +222,9 @@ function importData(msg) {
       for (const [k, v] of Object.entries(channels)) {
         const key = A.normalizeKey(k);
         if (!key || !v || typeof v !== 'object') continue;
-        const m = readMark(marks[key]);
+        const m = readMark(marks[key], ids);
         let changed = false;
-        for (const f of FLAGS) {
+        for (const f of ids) {
           if (A.val(v[f]) > 0 && !m[f]) { m[f] = 1; changed = true; }
         }
         if (!changed) continue;
@@ -225,9 +250,10 @@ function wipe() {
     const { marks = {}, queue = {}, sync } = await get(['marks', 'queue', 'sync']);
     const t = Date.now();
     if (sync?.enabled) {
+      const ids = await catIds();
       for (const [key, raw] of Object.entries(marks)) {
-        const m = readMark(raw);
-        const flags = FLAGS.filter(f => m[f]);
+        const m = readMark(raw, ids);
+        const flags = ids.filter(f => m[f]);
         for (const f of flags) m[f] = 0;
         queueVotes(queue, key, m, flags, t);
       }
@@ -280,10 +306,11 @@ function configureSync(msg) {
 
     const queue = {};
     const t = Date.now();
+    const ids = await catIds();
     for (const [key, raw] of Object.entries(marks)) {
-      const m = readMark(raw);
+      const m = readMark(raw, ids);
       if (m.src === 'import') continue; // other people's lists are not your votes
-      queueVotes(queue, key, m, FLAGS.filter(f => m[f]), t);
+      queueVotes(queue, key, m, ids.filter(f => m[f]), t);
     }
     const out = { sync: { enabled: true, server, gen }, queue, syncReplace: gen, pendingForget: forgets };
     await set(out);
@@ -458,9 +485,18 @@ async function fetchCommunity(server) {
   for (const [k, e] of Object.entries(data?.c && typeof data.c === 'object' ? data.c : {})) {
     if (A.normalizeKey(k) === k && A.isCommunityEntry(e)) c[k] = e;
   }
-  const count = Object.keys(c).length;
+  // Entries of categories the server's operator added, and those categories themselves
+  const x = {};
+  for (const [k, e] of Object.entries(data?.x && typeof data.x === 'object' ? data.x : {})) {
+    if (A.normalizeKey(k) === k && A.isCommunityExtra(e)) x[k] = e;
+  }
+  const extra = A.normalizeCategories(data?.cats).slice(A.DEFAULT_CATEGORIES.length);
+  const { categories: had } = await get('categories');
+  if (JSON.stringify(had || []) !== JSON.stringify(extra)) await set({ categories: extra }); // rebuilds the menu
+
+  const count = new Set([...Object.keys(c), ...Object.keys(x)]).size;
   await set({
-    community: { c },
+    community: { c, x },
     communityMeta: { count, etag: r.headers.get('etag'), generated: Number(data?.generated) || 0, checked: Date.now() },
   });
   return count;
@@ -550,16 +586,17 @@ function scheduleFlush() {
 /**
  * Turns a downloaded shared list into `{key: {ai, pe, name}}`, dropping invalid entries.
  * @param {Object} data
- * @returns {Object<string, {ai: boolean, pe: boolean, name: string}>}
+ * @param {string[]} ids category ids
+ * @returns {Object<string, Object>} per key `{<category>: true, …, name}` (ai and pe are always present)
  */
-function normalizeShared(data) {
+function normalizeShared(data, ids) {
   const src = data?.channels && typeof data.channels === 'object' ? data.channels : {};
   const out = {};
   for (const [k, v] of Object.entries(src)) {
     const key = A.normalizeKey(k);
     if (!key || !v || typeof v !== 'object') continue;
-    const ai = A.val(v.ai) > 0, pe = A.val(v.pe) > 0;
-    if (ai || pe) out[key] = { ai, pe, name: A.cleanName(v.name) || key };
+    const yes = ids.filter(f => A.val(v[f]) > 0);
+    if (yes.length) out[key] = { ai: false, pe: false, ...Object.fromEntries(yes.map(f => [f, true])), name: A.cleanName(v.name) || key };
   }
   return out;
 }
@@ -574,7 +611,7 @@ async function updateShared() {
   try {
     const r = await fetch(listUrl, { cache: 'no-cache' });
     if (!r.ok) throw new Error('HTTP ' + r.status);
-    const channels = normalizeShared(await r.json());
+    const channels = normalizeShared(await r.json(), await catIds());
     const count = Object.keys(channels).length;
     await set({ sharedList: { channels, count, updated: Date.now() } });
     return { ok: true, count };
@@ -587,21 +624,32 @@ async function updateShared() {
 // Context menu
 // ---------------------------------------------------------------------------
 
-const MENU_ACTIONS = Object.keys(A.ACTIONS);
 const MENU_CONTEXTS = ['page', 'link', 'image', 'video', 'selection'];
 const EVERYWHERE_ID = 'argus-everywhere';
 
-/** (Re)creates the right-click menu (on every page). Firefox for Android has no menus API. */
-async function buildMenus() {
+/** Menu items that are not mark actions. */
+const MENU_OTHER = new Set(['argus', 'sep1', 'sep2', 'settings', 'help']);
+let menuJob = Promise.resolve();
+
+/**
+ * (Re)creates the right-click menu (on every page): one "Mark as …" and one "Not …"
+ * item per category. Runs again whenever the category list changes. Calls are queued so
+ * two rebuilds can't interleave. Firefox for Android has no menus API.
+ */
+function buildMenus() {
+  menuJob = menuJob.then(buildMenusNow, buildMenusNow);
+  return menuJob;
+}
+
+async function buildMenusNow() {
   if (!api.contextMenus) return;
+  const cats = await getCats();
   await api.contextMenus.removeAll();
   const add = o => api.contextMenus.create({ contexts: MENU_CONTEXTS, ...o });
   add({ id: 'argus', title: 'Eyes of Argus' });
-  add({ id: 'ai', parentId: 'argus', title: 'Mark as AI' });
-  add({ id: 'pe', parentId: 'argus', title: 'Mark as private-equity owned' });
+  for (const c of cats) add({ id: c.id, parentId: 'argus', title: `Mark as ${c.title}` });
   add({ id: 'sep1', parentId: 'argus', type: 'separator' });
-  add({ id: 'notai', parentId: 'argus', title: 'Not AI (disagree)' });
-  add({ id: 'notpe', parentId: 'argus', title: 'Not PE-owned (disagree)' });
+  for (const c of cats) add({ id: 'not' + c.id, parentId: 'argus', title: `Not ${c.title} (disagree)` });
   add({ id: 'clear', parentId: 'argus', title: 'Clear' });
   add({ id: 'sep2', parentId: 'argus', type: 'separator' });
   add({ id: 'settings', parentId: 'argus', title: 'Settings' });
@@ -626,7 +674,7 @@ function flash(text, ok) {
  * Marks from the address alone: the right-clicked link, or (top frame, no link) the
  * page itself. The menu click hands these addresses over without any site permission,
  * which is what makes "mark any link on any website" work.
- * @param {string} action one of `A.ACTIONS`
+ * @param {string} action a menu action (see `Argus.actionChanges`)
  * @param {{linkUrl: string, pageUrl: string, frameId: number, linkText: string}} info
  * @returns {Promise<Object>} result of {@link applyMark}, or `{ok: false}`
  */
@@ -634,8 +682,10 @@ async function markFromUrl(action, info) {
   const url = info.linkUrl || ((info.frameId ?? 0) === 0 ? info.pageUrl : null);
   const key = url ? globalThis.ArgusPlatforms.keyForUrl(url) : null;
   if (!key) { flash('?', false); return { ok: false, error: 'nothing to mark' }; }
-  const res = await applyMark({ key, name: A.nameForKey(key), changes: A.ACTIONS[action].changes });
-  flash(res.ok ? ({ ai: 'AI', pe: 'PE' }[action] || 'OK') : '!', res.ok);
+  const act = A.actionChanges(action, await getCats());
+  if (!act) return { ok: false, error: 'unknown action' };
+  const res = await applyMark({ key, name: A.nameForKey(key), changes: act.changes });
+  flash(res.ok ? act.label.slice(0, 4) : '!', res.ok);
   return res;
 }
 
@@ -644,7 +694,7 @@ if (api.contextMenus) {
     const id = info.menuItemId;
     if (id === 'settings') return api.runtime.openOptionsPage();
     if (id === 'help') return api.tabs.create({ url: api.runtime.getURL('options.html#help') });
-    if (!MENU_ACTIONS.includes(id)) return;
+    if (typeof id !== 'string' || MENU_OTHER.has(id)) return;
     // Only the top frame runs the content script. Inside an iframe (live chat, embeds)
     // only the link address is reliable; without one, nothing is marked.
     if ((info.frameId ?? 0) !== 0 || tab?.id == null) { if (info.linkUrl) markFromUrl(id, info); return; }
@@ -676,6 +726,11 @@ async function setEverywhere(msg) {
   await set({ everywhere: on });
   return { ok: true };
 }
+
+// New categories from the sync server: rebuild the menu.
+api.storage.onChanged.addListener((ch, area) => {
+  if (area === 'local' && ch.categories) buildMenus();
+});
 
 // If the permission is taken away in the browser's own settings, switch the feature off.
 api.permissions?.onRemoved?.addListener(p => {

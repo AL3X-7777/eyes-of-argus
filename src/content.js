@@ -34,10 +34,15 @@
 
   let local = {};      // your marks         { key: {ai, pe, name, uc, t} }
   let shared = {};     // subscribed list    { key: {ai, pe, name} }
-  let community = {};  // community list     { key: [aiPct, aiVotes, pePct, peVotes, name?, overrideBits?] }
   let settings = { badges: true, tint: true, dim: false };
   let syncOn = false;
   let communityAll = {};
+  let community = {};  // community list     { key: [aiPct, aiVotes, pePct, peVotes, name?, overrideBits?] }
+  let communityX = {}; // … for added categories  { key: { <id>: [pct, votes] } }
+  /** Categories: the built-in ones plus those the sync server added. */
+  let cats = A.normalizeCategories([]);
+  /** @type {Map<string, {label: string, color: string, bg: string}>} appearance per category combination */
+  const looks = new Map();
 
   /** @type {Map<string, {st: string, title: (string|null)}>} key → state shown on this site */
   const merged = new Map();
@@ -62,28 +67,54 @@
 
     const add = key => {
       if (merged.has(key) || !site.owns(key)) return;
-      const l = mine[key], s = shared[key], c = community[key];
-      const on = FLAGS.filter((f, i) => {
-        const lv = A.val(l?.[f]);
-        return lv ? lv > 0 : !!(s?.[f] || (c && c[i * 2] > 0));
+      const l = mine[key], s = shared[key], c = community[key], x = communityX[key];
+      const on = cats.filter(cat => {
+        const lv = A.val(l?.[cat.id]);
+        if (lv) return lv > 0;
+        if (s?.[cat.id]) return true;
+        const i = FLAGS.indexOf(cat.id); // built-in categories sit in the entry array, added ones in `x`
+        return i >= 0 ? !!(c && c[i * 2] > 0) : !!(x && x[cat.id]?.[0] > 0);
       });
-      if (on.length) merged.set(key, { st: on.join(' '), title: c ? communityTitle(c) : null });
+      if (!on.length) return;
+      const st = on.map(cat => cat.id).join(' ');
+      if (!looks.has(st)) looks.set(st, look(on));
+      merged.set(key, { st, title: c || x ? communityTitle(c, x) : null, look: looks.get(st) });
     };
     for (const k in mine) add(k);
     for (const k in shared) add(k);
     for (const k in community) add(k);
+    for (const k in communityX) add(k);
+  }
+
+  /**
+   * How a combination of categories is drawn: the badge text, and one colour or, for
+   * several categories, equal hard-edged stripes of each colour.
+   * @param {Array<{label: string, color: string}>} on categories that apply, in order
+   * @returns {{label: string, color: string, bg: string}}
+   */
+  function look(on) {
+    const n = on.length;
+    const stops = on.map((cat, i) => `${cat.color} ${(100 * i / n).toFixed(2)}% ${(100 * (i + 1) / n).toFixed(2)}%`);
+    return { label: on.map(cat => cat.label).join(' · '), color: on[0].color, bg: `linear-gradient(90deg, ${stops.join(', ')})` };
   }
 
   /**
    * Hover text for a community entry.
-   * @param {Array} c `[aiPct, aiVotes, pePct, peVotes, name?, overrideBits?]`
+   * @param {Array} [c] `[aiPct, aiVotes, pePct, peVotes, name?, overrideBits?]`
+   * @param {Object} [x] entries of added categories `{<id>: [pct, votes]}`
    * @returns {?string}
    */
-  function communityTitle(c) {
-    const o = Number(c[5]) || 0;
+  function communityTitle(c, x) {
     const parts = [];
-    if (c[0]) parts.push(o & 1 ? 'AI (set by list maintainer)' : `AI ${c[0]}% of ${c[1]} votes`);
-    if (c[2]) parts.push(o & 2 ? 'PE-owned (set by list maintainer)' : `PE-owned ${c[2]}% of ${c[3]} votes`);
+    if (c) {
+      const o = Number(c[5]) || 0;
+      if (c[0]) parts.push(o & 1 ? 'AI (set by list maintainer)' : `AI ${c[0]}% of ${c[1]} votes`);
+      if (c[2]) parts.push(o & 2 ? 'PE-owned (set by list maintainer)' : `PE-owned ${c[2]}% of ${c[3]} votes`);
+    }
+    for (const cat of cats) {
+      const e = x && Object.hasOwn(x, cat.id) ? x[cat.id] : null;
+      if (e && e[0]) parts.push(`${cat.label} ${e[0]}% of ${e[1]} votes`);
+    }
     return parts.length ? 'Eyes of Argus community: ' + parts.join(' · ') : null;
   }
 
@@ -126,7 +157,12 @@
         if (!m) continue;
         const el = site.badgeEl ? site.badgeEl(a) : textLink(a);
         if (el) {
-          if (el.dataset.argus !== m.st) el.dataset.argus = m.st;
+          if (el.dataset.argus !== m.st || el.dataset.argusLabel !== m.look.label) {
+            el.dataset.argus = m.st;
+            el.dataset.argusLabel = m.look.label;      // badge text, read by CSS attr()
+            el.style.setProperty('--argus-color', m.look.color);
+            el.style.setProperty('--argus-bg', m.look.bg);
+          }
           if (m.title && el.title !== m.title) {
             if (!el.dataset.argusTitle && el.title) el.dataset.argusTitleOrig = el.title; // keep the page's own tooltip
             el.title = m.title; el.dataset.argusTitle = '1';
@@ -148,7 +184,12 @@
         if (el.dataset.argusCard && !cards.has(el)) delete el.dataset.argusCard;
         continue;
       }
-      delete el.dataset.argus;
+      if (el.dataset.argus !== undefined) {
+        delete el.dataset.argus;
+        delete el.dataset.argusLabel;
+        el.style.removeProperty('--argus-color');
+        el.style.removeProperty('--argus-bg');
+      }
       delete el.dataset.argusCard;
       if (el.dataset.argusTitle) restoreTitle(el);
     }
@@ -285,15 +326,13 @@
     return r;
   }
 
-  const { ACTIONS } = A;
-
   /**
    * Handles a menu click forwarded by the background.
-   * @param {string} action one of the ACTIONS keys
+   * @param {string} action a menu action (see `Argus.actionChanges`)
    */
   async function onMenu(action) {
-    if (!Object.hasOwn(ACTIONS, action)) return;
-    const a = ACTIONS[action];
+    const a = A.actionChanges(action, cats);
+    if (!a) return;
     const target = lastTarget && Date.now() - lastTarget.at < TARGET_MAX_AGE_MS ? lastTarget.el : null;
     lastTarget = null; // one right-click, one action
     const t = target && target.nodeType === 1 ? resolve(target) : target && target.parentElement ? resolve(target.parentElement) : null;
@@ -344,14 +383,18 @@
   // ---------------------------------------------------------------------------
 
   /** Shows the community list only while sync is on. */
-  const refreshCommunity = () => { community = syncOn ? communityAll : {}; };
+  const refreshCommunity = () => {
+    community = (syncOn && communityAll.c) || {};
+    communityX = (syncOn && communityAll.x) || {};
+  };
 
-  api.storage.local.get(['marks', 'sharedList', 'settings', 'sync', 'community']).then(d => {
+  api.storage.local.get(['marks', 'sharedList', 'settings', 'sync', 'community', 'categories']).then(d => {
+    cats = A.normalizeCategories(d.categories);
     local = d.marks || {};
     shared = d.sharedList?.channels || {};
     settings = { ...settings, ...(d.settings || {}) };
     syncOn = !!d.sync?.enabled;
-    communityAll = d.community?.c || {};
+    communityAll = d.community || {};
     refreshCommunity();
     rebuild(); applySettings(); schedule();
   });
@@ -359,11 +402,12 @@
   api.storage.onChanged.addListener((ch, area) => {
     if (area !== 'local') return;
     if (ch.settings) { settings = { ...settings, ...(ch.settings.newValue || {}) }; applySettings(); }
-    if (!(ch.marks || ch.sharedList || ch.sync || ch.community)) return;
+    if (!(ch.marks || ch.sharedList || ch.sync || ch.community || ch.categories)) return;
+    if (ch.categories) { cats = A.normalizeCategories(ch.categories.newValue); looks.clear(); }
     if (ch.marks) local = ch.marks.newValue || {};
     if (ch.sharedList) shared = ch.sharedList.newValue?.channels || {};
     if (ch.sync) syncOn = !!ch.sync.newValue?.enabled;
-    if (ch.community) communityAll = ch.community.newValue?.c || {};
+    if (ch.community) communityAll = ch.community.newValue || {};
     refreshCommunity();
     rebuild(); schedule();
   });

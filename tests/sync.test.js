@@ -56,7 +56,7 @@ test('votes are counted with weights, thresholds and overrides', async () => {
   assert.deepEqual(c['@slop'], [100, 2, 0, 0, ''], 'N10: 3 votes from one network, 2 count; Q11: names are not published');
   assert.equal(c['@split'], undefined, '1 yes / 1 no stays hidden');
 
-  srv.sql("INSERT INTO overrides VALUES ('@slop', 0, NULL, 'test')");
+  srv.sql("INSERT INTO overrides VALUES ('@slop', 'ai', 0, 'test')");
   await post('/admin/rebuild', {}, { authorization: 'Bearer test-admin' });
   assert.equal((await snapshot())['@slop'], undefined, 'override hides it');
   srv.sql('DELETE FROM overrides');
@@ -155,9 +155,10 @@ test('admin dashboard: page is served safely; API needs the token; hide, auto an
   assert.equal(pageRes.headers.get('x-frame-options'), 'DENY');
   const admin = { authorization: 'Bearer test-admin' };
   assert.equal((await fetch(srv.url + '/admin/api/channels')).status, 403);
-  assert.equal((await post('/admin/api/override', { key: '@x', ai: 0 }, { authorization: 'Bearer wrong' })).status, 403);
-  assert.equal((await post('/admin/api/override', { key: '@x', ai: 0 }, { ...admin, origin: 'https://evil.example' })).status, 403);
-  assert.equal((await post('/admin/api/override', { key: 'not a key', ai: 0 }, admin)).status, 400);
+  assert.equal((await post('/admin/api/override', { key: '@x', set: { ai: 0 } }, { authorization: 'Bearer wrong' })).status, 403);
+  assert.equal((await post('/admin/api/override', { key: '@x', set: { ai: 0 } }, { ...admin, origin: 'https://evil.example' })).status, 403);
+  assert.equal((await post('/admin/api/override', { key: 'not a key', set: { ai: 0 } }, admin)).status, 400);
+  assert.equal((await post('/admin/api/override', { key: '@x', set: { nope: 0 } }, admin)).status, 400);
 
   const a = await newUser(), b = await newUser();
   srv.sql('UPDATE users SET created_at = 0');
@@ -166,12 +167,65 @@ test('admin dashboard: page is served safely; API needs the token; hide, auto an
   assert.ok((await snapshot())['site:moderated.example']);
   const listed = await (await fetch(srv.url + '/admin/api/channels?q=moderated&shown=1', { headers: admin })).json();
   assert.equal(listed.channels[0].key, 'site:moderated.example');
-  assert.equal(listed.channels[0].ai.shown, true);
+  assert.equal(listed.channels[0].flags.ai.shown, true);
+  assert.equal(listed.channels[0].flags.ai.yes, 2);
 
-  assert.equal((await post('/admin/api/override', { key: 'site:moderated.example', ai: 0, pe: null }, admin)).status, 200);
+  assert.equal((await post('/admin/api/override', { key: 'site:moderated.example', set: { ai: 0 } }, admin)).status, 200);
   assert.equal((await snapshot())['site:moderated.example'], undefined, 'hidden immediately');
-  await post('/admin/api/override', { key: 'site:moderated.example', ai: null, pe: null }, admin);
+  await post('/admin/api/override', { key: 'site:moderated.example', set: { ai: null } }, admin);
   assert.ok((await snapshot())['site:moderated.example'], '"Auto" lets the votes decide again');
   await post('/admin/api/purge', { key: 'site:moderated.example' }, admin);
   assert.equal((await snapshot())['site:moderated.example'], undefined, 'votes deleted');
+});
+
+test('vote rules: one vote marks by default; "not" votes need more than twice the yes votes; rules are editable', async () => {
+  const admin = { authorization: 'Bearer test-admin' };
+  const before = (await (await fetch(srv.url + '/admin/api/state', { headers: admin })).json()).rules;
+  assert.equal((await post('/admin/api/rules', { minVotes: 1, notFactor: 2, warmupDays: 0, maxPerNet: 100 }, admin)).status, 200);
+  try {
+    const u = [];
+    for (let i = 0; i < 7; i++) u.push(await newUser());
+    const vote = (s, v) => post('/votes', { secret: s, votes: [{ k: 'site:rules.example', f: 'ai', v }] });
+    const shown = async () => { await recount(); return !!(await snapshot())['site:rules.example']; };
+
+    await vote(u[0], 1);
+    assert.equal(await shown(), true, 'a single vote marks');
+    await vote(u[1], 1);
+    for (const s of u.slice(2, 6)) await vote(s, -1); // 2 yes, 4 not
+    assert.equal(await shown(), true, '4 "not" votes are not enough against 2 yes votes');
+    await vote(u[6], -1); // 2 yes, 5 not
+    assert.equal(await shown(), false, '5 "not" votes remove a mark with 2 yes votes');
+
+    assert.equal((await post('/admin/api/rules', { minVotes: 0, notFactor: 'x' }, admin)).status, 200);
+    const now = (await (await fetch(srv.url + '/admin/api/state', { headers: admin })).json()).rules;
+    assert.deepEqual([now.minVotes, now.notFactor], [1, 2], 'out-of-range values fall back to the defaults');
+    assert.equal((await post('/admin/api/rules', { minVotes: 3 })).status, 403);
+  } finally {
+    await post('/admin/api/rules', before, admin);
+  }
+});
+
+test('categories: added in the dashboard, voted on, published separately, removed with their votes', async () => {
+  const admin = { authorization: 'Bearer test-admin' };
+  const s = await newUser(), s2 = await newUser();
+  srv.sql('UPDATE users SET created_at = 0');
+  const vote = sec => post('/votes', { secret: sec, votes: [{ k: 'site:cats.example', f: 'sponsored', v: 1 }] });
+  assert.equal((await vote(s)).status, 400, 'unknown categories are refused');
+  for (const bad of [{ id: 'ai', label: 'X', color: '#000000' }, { id: 'notgood', label: 'X', color: '#000000' }, { id: 'ok', label: 'X', color: 'red' }, { id: 'name', label: 'X', color: '#000000' }]) {
+    assert.equal((await post('/admin/api/category', bad, admin)).status, 400, JSON.stringify(bad));
+  }
+  assert.equal((await post('/admin/api/category', { id: 'Sponsored', label: 'AD', title: 'sponsored content', color: '#16A34A' }, admin)).status, 200);
+  for (const sec of [s, s2]) assert.equal((await vote(sec)).status, 200);
+  await recount();
+  const full = await (await fetch(srv.url + '/snapshot.json')).json();
+  assert.deepEqual(full.cats, [{ id: 'sponsored', label: 'AD', title: 'sponsored content', color: '#16a34a' }]);
+  assert.deepEqual(full.x['site:cats.example'], { sponsored: [100, 2] });
+  assert.equal(full.c['site:cats.example'], undefined, 'older extensions only see AI/PE entries');
+
+  assert.equal((await post('/admin/api/category/delete', { id: 'ai' }, admin)).status, 400);
+  assert.equal((await post('/admin/api/category/delete', { id: 'sponsored' }, admin)).status, 200);
+  const after = await (await fetch(srv.url + '/snapshot.json')).json();
+  assert.deepEqual(after.cats, []);
+  assert.equal(after.x['site:cats.example'], undefined);
+  assert.equal((await vote(s)).status, 400);
 });

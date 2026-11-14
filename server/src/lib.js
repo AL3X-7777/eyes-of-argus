@@ -18,21 +18,43 @@ export const DAY = 86400e3;
 const num = (v, d) => (v !== undefined && v !== '' && Number.isFinite(+v) ? +v : d);
 
 /**
- * Server settings from `wrangler.toml` `[vars]`, with safe defaults.
+ * Technical settings from `wrangler.toml` `[vars]`, with safe defaults. The vote rules
+ * are not here: they are edited in the moderation dashboard (see {@link RULE_DEFAULTS}).
  * @param {Object} env Worker environment
  */
 export function cfg(env) {
   return {
     powBits: Math.min(num(env.POW_BITS, 18), A.LIMITS.POW_MAX_BITS),
-    minVotes: num(env.MIN_VOTES, 15),
-    minAgree: num(env.MIN_AGREE, 70),
-    warmupMs: num(env.WARMUP_DAYS, 3) * DAY,
-    maxPerNet: num(env.MAX_PER_NET, 2),
     votesPerDay: num(env.VOTES_PER_DAY, 1000),
     votesPerNetDay: num(env.VOTES_PER_NET_DAY, 5000),
     regPerNetDay: num(env.REG_PER_NET_DAY, 5),
     maxPerRun: Math.min(num(env.MAX_PER_RUN, 900), 1800), // free plan: 50 queries and 10 ms CPU per run
   };
+}
+
+/**
+ * Vote rules and their allowed ranges. Stored in the `settings` table once changed in
+ * the dashboard; these are the values used until then.
+ *
+ * A mark shows for everyone when it has at least `minVotes` "yes" votes and the "not"
+ * votes don't outnumber them by more than `notFactor` to one. With the defaults
+ * (1 and 2): one vote marks, and a mark with 2 yes votes needs 5 "not" votes to go.
+ */
+export const RULE_DEFAULTS = Object.freeze({ minVotes: 1, notFactor: 2, warmupDays: 0, maxPerNet: 2 });
+const RULE_RANGES = { minVotes: [1, 1000], notFactor: [0.5, 100], warmupDays: [0, 30], maxPerNet: [1, 100] };
+
+/**
+ * Merges stored or submitted rule values over the defaults, dropping anything out of range.
+ * @param {Object} raw e.g. `{minVotes: "3"}`
+ * @returns {{minVotes: number, notFactor: number, warmupDays: number, maxPerNet: number}}
+ */
+export function cleanRules(raw) {
+  const out = { ...RULE_DEFAULTS };
+  for (const [k, [lo, hi]] of Object.entries(RULE_RANGES)) {
+    const v = Number(raw?.[k]);
+    if (raw?.[k] !== undefined && raw[k] !== '' && Number.isFinite(v) && v >= lo && v <= hi) out[k] = k === 'notFactor' ? v : Math.round(v);
+  }
+  return out;
 }
 
 /**
@@ -126,32 +148,56 @@ export function chunks(arr, n) {
 }
 
 /**
- * Turns one channel's weighted tally into its community entry.
- * @param {Object} t per flag `{up, down, n}` (weighted up/down, raw count)
- * @param {Object} [ov] admin override (1 show, 0 hide)
- * @param {{minVotes: number, minAgree: number}} c
- * @returns {{entry: Array|null, raw: Object, total: number}} entry null = not shown
+ * Applies the vote rules to one flag of one channel.
+ * @param {Object} [r] weighted tally `{up, down, n}`
+ * @param {number|null} [o] moderator override: 1 always show, 0 never show
+ * @param {{minVotes: number, notFactor: number}} rules
+ * @returns {{shown: boolean, forced: boolean, pct: number, votes: number, up: number, down: number, n: number}}
  */
-export function score(t, ov, c) {
+export function scoreFlag(r, o, rules) {
+  const up = r?.up || 0, down = r?.down || 0, n = r?.n || 0;
+  const pct = up + down > 0 ? Math.round((100 * up) / (up + down)) : 0;
+  // "not" votes need more than notFactor times the yes votes to remove a mark
+  let shown = up >= rules.minVotes && down <= (rules.notFactor ?? RULE_DEFAULTS.notFactor) * up;
+  const forced = o === 1;
+  if (forced) shown = true;
+  if (o === 0) shown = false;
+  return { shown, forced, pct: shown ? Math.max(pct, forced && !pct ? 100 : 1) : 0, votes: Math.round(up + down), up, down, n };
+}
+
+/**
+ * Turns one channel's tallies into what is published and what the dashboard shows.
+ * @param {Object} t per flag `{up, down, n}`
+ * @param {Object} [ov] moderator overrides per flag
+ * @param {Object} rules vote rules
+ * @param {string[]} [ids] every category id (the first two are the built-in ones)
+ * @returns {{entry: ?Array, extra: ?Object, tally: Object, total: number}}
+ *   `entry`: `[aiPct, aiVotes, pePct, peVotes, "", overrideBits?]` or null;
+ *   `extra`: `{<id>: [pct, votes]}` for other categories that are shown, or null;
+ *   `tally`: `{<id>: [yes, no, shown]}` for the dashboard
+ */
+export function score(t, ov, rules, ids = A.FLAGS) {
+  const tally = {};
   const out = [];
-  const raw = {};
-  let overrides = 0, total = 0;
-  A.FLAGS.forEach((f, i) => {
-    const r = t?.[f] || {};
-    const up = r.up || 0, down = r.down || 0, n = r.n || 0;
-    total += n;
-    const weighted = Math.round(up + down); // shown as "x% of N votes": only votes that counted
-    const pct = up + down > 0 ? Math.round((100 * up) / (up + down)) : 0;
-    raw[f] = { pct, n };
-    let shown = up + down >= c.minVotes && pct >= c.minAgree;
-    if (ov?.[f] === 1) { shown = true; overrides |= 1 << i; }
-    if (ov?.[f] === 0) shown = false;
-    out.push(shown ? Math.max(pct, ov?.[f] === 1 && !pct ? 100 : 1) : 0, weighted);
-  });
-  if (!out[0] && !out[2]) return { entry: null, raw, total };
-  const entry = [...out, '']; // fifth slot kept for compatibility; voter-supplied names are never published
-  if (overrides) entry.push(overrides);
-  return { entry, raw, total };
+  let extra = null, overrides = 0, total = 0;
+  for (const id of ids) {
+    const s = scoreFlag(t?.[id], ov?.[id], rules);
+    total += s.n;
+    if (s.n || s.shown) tally[id] = [s.up, s.down, s.shown ? 1 : 0];
+    const builtin = A.FLAGS.indexOf(id);
+    if (builtin >= 0) {
+      out[builtin * 2] = s.pct; out[builtin * 2 + 1] = s.votes;
+      if (s.forced) overrides |= 1 << builtin;
+    } else if (s.shown) {
+      (extra ||= {})[id] = [s.pct, s.votes];
+    }
+  }
+  let entry = null;
+  if (out[0] || out[2]) {
+    entry = [out[0] || 0, out[1] || 0, out[2] || 0, out[3] || 0, '']; // fifth slot kept for older extensions; names are never published
+    if (overrides) entry.push(overrides);
+  }
+  return { entry, extra, tally, total };
 }
 
 /**

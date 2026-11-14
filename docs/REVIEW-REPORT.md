@@ -154,3 +154,20 @@ pages, the right-click path, and no access for page scripts.
 
 72 tests and the real-Chrome smoke test pass. Not verified: Cloudflare's CPU limit (local testing
 does not enforce it), live sites, and Firefox in a real browser.
+
+---
+
+# v0.6.0 changes
+
+- **Categories can be added** in the server's moderation dashboard (up to 10 besides AI and PE).
+  Extensions pick them up with the community list: menu items, badges, colours, settings table,
+  export and import all work per category. Several categories on one name are drawn as stripes.
+- **New vote rule:** one "yes" vote shows a mark; it takes more than twice as many "not" votes to
+  remove it. The rules are editable in the dashboard. This is the operator's choice and removes
+  the earlier protection against a single person marking a channel (see the threat model).
+- **Database layout version 2**, upgraded automatically by the Worker; tested against a copy of
+  the version 1 layout with votes and overrides in it.
+- The published list stays readable by v0.5 extensions: AI/PE entries are unchanged, added
+  categories travel in separate fields.
+
+78 tests, the real-Chrome smoke test and a real-Chrome run of the dashboard pass.

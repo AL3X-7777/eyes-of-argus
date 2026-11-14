@@ -30,6 +30,7 @@ Features:
 • Works offline: your marks are stored in your browser, no account needed
 • Export and import your marks, or subscribe to a list someone else maintains
 • Optional community sync: share your marks as anonymous votes with a sync server you choose, and see marks that enough people agree on
+• The sync server's operator can add more categories; they appear in the menu automatically
 • Disagree with a community mark? "Not AI" / "Not PE-owned" hides it for you and counts as a vote against it
 • No ads, no analytics, no tracking. Open source (MIT)
 

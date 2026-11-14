@@ -9,15 +9,19 @@ Cloudflare's free plan. It includes a moderation dashboard at `/admin`.
   usually a few seconds in a browser). It only slows browsers down, not determined attackers,
   so the real protection is the rules below.
 - Votes are `+1` (yes), `-1` (not) or `0` (withdraw), per channel and flag (`ai` / `pe`).
-- Every 15 minutes a scheduled job recounts only the channels that changed and patches
-  `snapshot.json`. A flag shows for everyone at **≥ 15 weighted votes and ≥ 70 % agreement**.
-- `overrides` table: your manual "always show" / "never show" per channel.
+- Every 15 minutes a scheduled job recounts only the channels that changed and republishes
+  `snapshot.json`.
+- **Vote rules** (editable in the dashboard, no redeploy needed). By default **one "yes" vote
+  shows a mark for everyone**, and it takes **more than twice as many "not" votes** to remove it:
+  a mark with 2 yes votes goes at 5 "not" votes.
+- **Categories:** AI and PE are built in. More can be added in the dashboard; extensions pick
+  them up with their next list download and add them to the right-click menu.
 
 ## Threat model
 
 | Attack | Defence |
 |---|---|
-| One person marks a channel with many fake installs | new installs carry **no weight for 3 days**; at most **2 counted votes per channel per network**; at most 5 new installs per network per day; 15 weighted votes needed |
+| One person marks a channel | **Not prevented with the default rules: one vote is enough.** What limits the damage: "not" votes from other users, your dashboard (Hide), at most 2 counted votes per mark per network, at most 5 new installs per network per day. To make it harder, raise "Yes votes needed" and "Days before a new install's votes count" in the dashboard |
 | A website uses its visitors' browsers to register or vote | POSTs need `application/json` (forces a CORS preflight that is never allowed) and an extension `Origin` (or none) |
 | IPv6 address hopping | networks are grouped by /56 |
 | Huge requests | bodies over 64 KB are refused |
@@ -25,8 +29,8 @@ Cloudflare's free plan. It includes a moderation dashboard at `/admin`.
 | A voter gives a channel a misleading name | names sent by voters are stored but never published in the snapshot |
 | Wrong marks | your admin `overrides` table can always hide or force a flag |
 
-Not covered: a determined attacker with many networks over many days. For that, watch the
-`channels` table and use overrides.
+With the default rules this server trusts its users: check the dashboard regularly, and tighten the
+rules there if wrong marks become a problem.
 
 ## Data kept and for how long
 
@@ -68,6 +72,15 @@ unsent votes in its queue and retries later.
 Beyond that, the choice is yours: stay free and accept the daily cut-off, or move to Workers Paid.
 Watch usage in the Cloudflare dashboard under Workers & Pages, D1 and KV.
 
+## Updating a running server
+
+1. Download the new code and copy your existing `wrangler.toml` (it has your database and KV ids)
+   over the new one in the `server` folder.
+2. In the `server` folder: `npm install`, then `npm run deploy`.
+
+The database is upgraded automatically the first time the new version runs; votes and your
+moderation decisions are kept. Don't run `npm run db:remote` again.
+
 ## Run it locally (offline, nothing leaves your PC)
 ```
 npm install
@@ -93,9 +106,14 @@ You get an address like `https://eyes-of-argus.<you>.workers.dev`. That's the sy
 
 ## Moderation dashboard
 
-Open `https://<your-worker>/admin` and enter the `ADMIN_TOKEN` you set at deploy time. It lists the
-community marks (search by key or name) and lets you:
-- **Hide AI / Hide PE / Hide both:** stop a mark from showing for everyone, whatever the votes say;
+Open `https://<your-worker>/admin` and enter the `ADMIN_TOKEN` you set at deploy time. It has three parts:
+
+- **Vote rules:** yes votes needed, "not" votes needed per yes vote, days before a new install's
+  votes count, counted votes per network per mark. Saving recounts everything.
+- **Categories:** add a category (id, badge text, menu text, colour) or remove an added one
+  together with its votes. Up to 10 on top of AI and PE.
+- **Marks:** the community marks (search by key or name), where you can:
+- **Hide / Hide all:** stop a mark from showing for everyone, whatever the votes say;
 - **Auto:** let the votes decide again;
 - **Delete votes:** remove every vote for that entry;
 - **Recount everything.**
@@ -105,8 +123,8 @@ Changes show in the published list immediately; extensions pick them up at their
 
 Use a long random `ADMIN_TOKEN` (40 characters or more): it is the only thing protecting this page.
 The same actions work from a terminal, for example:
-`curl -X POST https://<your-worker>/admin/api/override -H "authorization: Bearer <ADMIN_TOKEN>" -H "content-type: application/json" -d '{"key":"@handle","ai":0,"pe":null}'`
+`curl -X POST https://<your-worker>/admin/api/override -H "authorization: Bearer <ADMIN_TOKEN>" -H "content-type: application/json" -d '{"key":"@handle","set":{"ai":0}}'`
 
-Tune thresholds and limits in `wrangler.toml` under `[vars]`.
+Rate limits are in `wrangler.toml` under `[vars]`.
 
 Your own marks (not the community's) are removed in the extension: toolbar icon → **Your marks**.

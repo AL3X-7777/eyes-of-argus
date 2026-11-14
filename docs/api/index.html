@@ -52,7 +52,7 @@ Optional community sync through a tiny self-hosted server (see <code>server/READ
 <p><strong>Firefox (for testing)</strong></p>
 <ol>
 <li>Open <code>about:debugging#/runtime/this-firefox</code></li>
-<li>Click <strong>Load Temporary Add-on…</strong> and pick <code>eyes-of-argus-firefox-0.5.0.zip</code></li>
+<li>Click <strong>Load Temporary Add-on…</strong> and pick <code>eyes-of-argus-firefox-0.6.0.zip</code></li>
 <li>Reload any open YouTube tabs</li>
 </ol>
 <p>Temporary add-ons disappear when Firefox restarts. To keep it installed, upload the zip to
@@ -60,7 +60,7 @@ https://addons.mozilla.org/developers/ as <strong>&quot;On your own&quot;</stron
 get a signed <code>.xpi</code> you can install permanently.</p>
 <p><strong>Chrome / Edge / Brave / Opera</strong></p>
 <ol>
-<li>Unzip <code>eyes-of-argus-chrome-0.5.0.zip</code> into a folder</li>
+<li>Unzip <code>eyes-of-argus-chrome-0.6.0.zip</code> into a folder</li>
 <li>Open <code>chrome://extensions</code> (or <code>edge://extensions</code>), turn on <strong>Developer mode</strong></li>
 <li>Click <strong>Load unpacked</strong> and pick the folder</li>
 </ol>
@@ -74,7 +74,7 @@ get a signed <code>.xpi</code> you can install permanently.</p>
 <li>Click the toolbar icon for settings: badges, tinting, fading marked videos, your list of marks</li>
 </ul>
 <h2>Community sync</h2>
-<p>Turn it on in settings and enter your sync server address. Votes are queued while you're offline
+<p>Turn it on in settings. The project's sync server is filled in already; you can enter your own instead. Votes are queued while you're offline
 and sent when you're back online. The community list is cached for offline use.</p>
 <h2>Sharing marks without a server</h2>
 <ul>
@@ -94,7 +94,7 @@ into <strong>Shared list</strong>. It updates twice a day when online. Your own 
 <h2>Development</h2>
 <pre class="prettyprint source"><code>npm install && (cd server && npm install)
 python build.py      # builds dist/
-npm test             # 73 tests, including a local sync server
+npm test             # 78 tests, including a local sync server
 npm run test:browser # loads the Chrome build into a real Chrome
 npm run lint         # ESLint + Mozilla's add-on linter
 npm run docs         # API reference in docs/api
@@ -141,12 +141,28 @@ does goes through the small API below, and every API call needs the admin token 
 <td>the dashboard page</td>
 </tr>
 <tr>
+<td><code>GET  /admin/api/state</code></td>
+<td>vote rules and categories</td>
+</tr>
+<tr>
+<td><code>POST /admin/api/rules</code></td>
+<td><code>{minVotes, notFactor, warmupDays, maxPerNet}</code> → save, recount everything</td>
+</tr>
+<tr>
+<td><code>POST /admin/api/category</code></td>
+<td><code>{id, label, title, color}</code> → add or change a category</td>
+</tr>
+<tr>
+<td><code>POST /admin/api/category/delete</code></td>
+<td><code>{id}</code> → remove an added category and its votes</td>
+</tr>
+<tr>
 <td><code>GET  /admin/api/channels</code></td>
-<td><code>?q=&lt;search&gt;&amp;shown=1</code> → up to 100 entries with tallies and overrides</td>
+<td><code>?q=&lt;search&gt;&amp;shown=1</code> → up to 90 entries with tallies and overrides</td>
 </tr>
 <tr>
 <td><code>POST /admin/api/override</code></td>
-<td><code>{key, ai, pe, note}</code> with ai/pe: 1 = always show, 0 = never show, null = let votes decide</td>
+<td>`{key, set: {<category>: 1</td>
 </tr>
 <tr>
 <td><code>POST /admin/api/purge</code></td>
@@ -295,8 +311,9 @@ does goes through the small API below, and every API call needs the admin token 
 </table>
 <p>Abuse resistance (see server/README.md, &quot;Threat model&quot;): POSTs only from extensions
 or non-browser clients; daily limits per install and per network (IPv6 grouped by
-/56); new installs carry no weight for their first days; at most <code>MAX_PER_NET</code>
-votes per channel count from installs registered on the same network.</p></div>
+/56); at most <code>maxPerNet</code> votes per channel count from installs registered on the
+same network; an optional warm-up period for new installs. The vote rules themselves
+are set in the moderation dashboard (schema.js <code>loadState</code>).</p></div>
         
 
         
@@ -474,6 +491,101 @@ unit-tested in Node.</p></div>
 
 <header>
     
+        <h2>server/src/schema.js</h2>
+        
+    
+</header>
+
+<article>
+    <div class="container-overview">
+    
+        
+            <div class="description"><p>Database layout checks and the automatic upgrade from version 1 (v0.5) to
+version 2 (extendable categories, dashboard rules). Runs inside the Worker, so
+deploying the new code is all an existing server needs.</p></div>
+        
+
+        
+
+
+<dl class="details">
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+    <dt class="tag-source">Source:</dt>
+    <dd class="tag-source"><ul class="dummy"><li>
+        <a href="server_src_schema.js.html">server/src/schema.js</a>, <a href="server_src_schema.js.html#line1">line 1</a>
+    </li></ul></dd>
+    
+
+    
+
+    
+
+    
+</dl>
+
+
+        
+    
+    </div>
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+
+    
+</article>
+
+</section>
+
+
+
+
+
+
+
+<section>
+
+<header>
+    
         <h2>src/background.js</h2>
         
     
@@ -512,7 +624,7 @@ last community list always keeps working offline.</li>
 <tr>
 <td>marks</td>
 <td>background</td>
-<td><code>{ [key]: {ai, pe, name, uc?, t} }</code> with ai/pe ∈ {1, -1, 0}</td>
+<td><code>{ [key]: {ai, pe, &lt;other categories&gt;, name, uc?, t} }</code> with each category ∈ {1, -1, 0}</td>
 </tr>
 <tr>
 <td>queue</td>
@@ -547,7 +659,12 @@ last community list always keeps working offline.</li>
 <tr>
 <td>community</td>
 <td>background</td>
-<td><code>{c: {[key]: entry}}</code> only rewritten when the list changed</td>
+<td><code>{c: {[key]: entry}, x: {[key]: {[category]: [pct, votes]}}}</code> only rewritten when the list changed</td>
+</tr>
+<tr>
+<td>categories</td>
+<td>background</td>
+<td>categories the sync server added (the built-in ones are in shared.js)</td>
 </tr>
 <tr>
 <td>communityMeta</td>
@@ -1128,7 +1245,7 @@ Everything is exposed on one frozen global, <code>globalThis.Argus</code>.</p></
 </div>
 
 <nav>
-    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="HttpError.html">HttpError</a></li></ul><h3>Global</h3><ul><li><a href="global.html#A">A</a></li><li><a href="global.html#CACHE_KEY">CACHE_KEY</a></li><li><a href="global.html#CACHE_SECONDS">CACHE_SECONDS</a></li><li><a href="global.html#CORS_GET">CORS_GET</a></li><li><a href="global.html#DAY">DAY</a></li><li><a href="global.html#EVERYWHERE">EVERYWHERE</a></li><li><a href="global.html#FROM_TABS">FROM_TABS</a></li><li><a href="global.html#HANDLERS">HANDLERS</a></li><li><a href="global.html#IMPORT">IMPORT</a></li><li><a href="global.html#MARK">MARK</a></li><li><a href="global.html#MAX_BATCH">MAX_BATCH</a></li><li><a href="global.html#MAX_BODY">MAX_BODY</a></li><li><a href="global.html#MAX_NAME">MAX_NAME</a></li><li><a href="global.html#MENU">MENU</a></li><li><a href="global.html#POW_MAX_BITS">POW_MAX_BITS</a></li><li><a href="global.html#SITES">SITES</a></li><li><a href="global.html#SYNC_CONFIG">SYNC_CONFIG</a></li><li><a href="global.html#SYNC_NOW">SYNC_NOW</a></li><li><a href="global.html#UPDATE_LIST">UPDATE_LIST</a></li><li><a href="global.html#WIPE">WIPE</a></li><li><a href="global.html#admin">admin</a></li><li><a href="global.html#allow">allow</a></li><li><a href="global.html#applyMark">applyMark</a></li><li><a href="global.html#buildMenus">buildMenus</a></li><li><a href="global.html#cfg">cfg</a></li><li><a href="global.html#chunks">chunks</a></li><li><a href="global.html#configureSync">configureSync</a></li><li><a href="global.html#dirtyUserChannels">dirtyUserChannels</a></li><li><a href="global.html#ensureIdentity">ensureIdentity</a></li><li><a href="global.html#expandV6">expandV6</a></li><li><a href="global.html#fetchCommunity">fetchCommunity</a></li><li><a href="global.html#flash">flash</a></li><li><a href="global.html#flushQueue">flushQueue</a></li><li><a href="global.html#forHost">forHost</a></li><li><a href="global.html#forget">forget</a></li><li><a href="global.html#get">get</a></li><li><a href="global.html#importData">importData</a></li><li><a href="global.html#json">json</a></li><li><a href="global.html#list">list</a></li><li><a href="global.html#markFromUrl">markFromUrl</a></li><li><a href="global.html#netHash">netHash</a></li><li><a href="global.html#netOf">netOf</a></li><li><a href="global.html#normalizeShared">normalizeShared</a></li><li><a href="global.html#num">num</a></li><li><a href="global.html#originAllowed">originAllowed</a></li><li><a href="global.html#page">page</a></li><li><a href="global.html#post">post</a></li><li><a href="global.html#publish">publish</a></li><li><a href="global.html#queueVotes">queueVotes</a></li><li><a href="global.html#readJson">readJson</a></li><li><a href="global.html#readMark">readMark</a></li><li><a href="global.html#rebuild">rebuild</a></li><li><a href="global.html#register">register</a></li><li><a href="global.html#safeEqual">safeEqual</a></li><li><a href="global.html#scheduleFlush">scheduleFlush</a></li><li><a href="global.html#score">score</a></li><li><a href="global.html#sendPendingForget">sendPendingForget</a></li><li><a href="global.html#serial">serial</a></li><li><a href="global.html#set">set</a></li><li><a href="global.html#setEverywhere">setEverywhere</a></li><li><a href="global.html#setup">setup</a></li><li><a href="global.html#snapshot">snapshot</a></li><li><a href="global.html#solvePow">solvePow</a></li><li><a href="global.html#syncNow">syncNow</a></li><li><a href="global.html#syncOnce">syncOnce</a></li><li><a href="global.html#touch">touch</a></li><li><a href="global.html#unqueue">unqueue</a></li><li><a href="global.html#updateShared">updateShared</a></li><li><a href="global.html#userFromSecret">userFromSecret</a></li><li><a href="global.html#votes">votes</a></li><li><a href="global.html#wipe">wipe</a></li></ul>
+    <h2><a href="index.html">Home</a></h2><h3>Classes</h3><ul><li><a href="HttpError.html">HttpError</a></li></ul><h3>Global</h3><ul><li><a href="global.html#A">A</a></li><li><a href="global.html#CACHE_KEY">CACHE_KEY</a></li><li><a href="global.html#CACHE_SECONDS">CACHE_SECONDS</a></li><li><a href="global.html#CORS_GET">CORS_GET</a></li><li><a href="global.html#DAY">DAY</a></li><li><a href="global.html#EVERYWHERE">EVERYWHERE</a></li><li><a href="global.html#FROM_TABS">FROM_TABS</a></li><li><a href="global.html#HANDLERS">HANDLERS</a></li><li><a href="global.html#IMPORT">IMPORT</a></li><li><a href="global.html#MARK">MARK</a></li><li><a href="global.html#MAX_BATCH">MAX_BATCH</a></li><li><a href="global.html#MAX_BODY">MAX_BODY</a></li><li><a href="global.html#MAX_NAME">MAX_NAME</a></li><li><a href="global.html#MENU">MENU</a></li><li><a href="global.html#MENU_OTHER">MENU_OTHER</a></li><li><a href="global.html#POW_MAX_BITS">POW_MAX_BITS</a></li><li><a href="global.html#RULE_DEFAULTS">RULE_DEFAULTS</a></li><li><a href="global.html#SITES">SITES</a></li><li><a href="global.html#SYNC_CONFIG">SYNC_CONFIG</a></li><li><a href="global.html#SYNC_NOW">SYNC_NOW</a></li><li><a href="global.html#UPDATE_LIST">UPDATE_LIST</a></li><li><a href="global.html#UPGRADE_V2">UPGRADE_V2</a></li><li><a href="global.html#WIPE">WIPE</a></li><li><a href="global.html#admin">admin</a></li><li><a href="global.html#allow">allow</a></li><li><a href="global.html#applyMark">applyMark</a></li><li><a href="global.html#buildMenus">buildMenus</a></li><li><a href="global.html#catIds">catIds</a></li><li><a href="global.html#cfg">cfg</a></li><li><a href="global.html#chunks">chunks</a></li><li><a href="global.html#cleanRules">cleanRules</a></li><li><a href="global.html#configureSync">configureSync</a></li><li><a href="global.html#dirtyAll">dirtyAll</a></li><li><a href="global.html#dirtyUserChannels">dirtyUserChannels</a></li><li><a href="global.html#ensureIdentity">ensureIdentity</a></li><li><a href="global.html#ensureSchema">ensureSchema</a></li><li><a href="global.html#expandV6">expandV6</a></li><li><a href="global.html#fetchCommunity">fetchCommunity</a></li><li><a href="global.html#flash">flash</a></li><li><a href="global.html#flushQueue">flushQueue</a></li><li><a href="global.html#forHost">forHost</a></li><li><a href="global.html#forget">forget</a></li><li><a href="global.html#get">get</a></li><li><a href="global.html#getCats">getCats</a></li><li><a href="global.html#hasOpinion">hasOpinion</a></li><li><a href="global.html#importData">importData</a></li><li><a href="global.html#json">json</a></li><li><a href="global.html#list">list</a></li><li><a href="global.html#loadState">loadState</a></li><li><a href="global.html#markFromUrl">markFromUrl</a></li><li><a href="global.html#netHash">netHash</a></li><li><a href="global.html#netOf">netOf</a></li><li><a href="global.html#normalizeShared">normalizeShared</a></li><li><a href="global.html#num">num</a></li><li><a href="global.html#originAllowed">originAllowed</a></li><li><a href="global.html#page">page</a></li><li><a href="global.html#post">post</a></li><li><a href="global.html#publish">publish</a></li><li><a href="global.html#queueVotes">queueVotes</a></li><li><a href="global.html#readJson">readJson</a></li><li><a href="global.html#readMark">readMark</a></li><li><a href="global.html#rebuild">rebuild</a></li><li><a href="global.html#register">register</a></li><li><a href="global.html#safeEqual">safeEqual</a></li><li><a href="global.html#scheduleFlush">scheduleFlush</a></li><li><a href="global.html#score">score</a></li><li><a href="global.html#scoreFlag">scoreFlag</a></li><li><a href="global.html#sendPendingForget">sendPendingForget</a></li><li><a href="global.html#serial">serial</a></li><li><a href="global.html#set">set</a></li><li><a href="global.html#setEverywhere">setEverywhere</a></li><li><a href="global.html#setup">setup</a></li><li><a href="global.html#snapshot">snapshot</a></li><li><a href="global.html#solvePow">solvePow</a></li><li><a href="global.html#state">state</a></li><li><a href="global.html#syncNow">syncNow</a></li><li><a href="global.html#syncOnce">syncOnce</a></li><li><a href="global.html#touch">touch</a></li><li><a href="global.html#unqueue">unqueue</a></li><li><a href="global.html#updateShared">updateShared</a></li><li><a href="global.html#userFromSecret">userFromSecret</a></li><li><a href="global.html#votes">votes</a></li><li><a href="global.html#wipe">wipe</a></li></ul>
 </nav>
 
 <br class="clear">

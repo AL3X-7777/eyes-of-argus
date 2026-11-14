@@ -77,8 +77,7 @@ li { margin: 4px 0; }
 .ok { color: #86efac; } .err { color: #fca5a5; }
 
 td select { background: #0f0f13; color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 2px 4px; font: inherit; font-size: 12.5px; cursor: pointer; }
-td select.yes.ai { border-color: var(--ai); color: #c4b5fd; }
-td select.yes.pe { border-color: var(--pe); color: #fcd34d; }
+td select.yes { color: #e8e8ec; border-width: 2px; }
 td select.no { border-color: #4b1f24; color: #fca5a5; }
 th:nth-child(n+2), td:nth-child(n+2) { width: 70px; }
 p.small { font-size: 12.5px; }

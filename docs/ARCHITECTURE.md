@@ -41,6 +41,14 @@ links that leave the current site are keyed by where they point.
 To support another site: add an adapter to `src/platforms.js`, its hosts to `SITES` in `build.py`,
 and, for a new key prefix, an entry in `PLATFORMS` in `src/shared.js`.
 
+## Categories
+
+`ai` and `pe` are built in (`Argus.DEFAULT_CATEGORIES`). A sync server can publish up to 10 more
+(`{id, label, title, color}`, added in its dashboard); the extension stores them under `categories`,
+rebuilds the right-click menu ("Mark as …" and "Not …" per category) and draws their badges. Marks,
+votes, exports and the settings table all work per category id. A name with several categories is
+drawn in equal stripes of their colours.
+
 ## Data flow
 
 ```
@@ -66,6 +74,7 @@ Display priority for each flag: **your mark** (yes / not) → **shared list** �
 | `identity` | `{secret, id, registeredAt}`; the server only ever sees `secret` over HTTPS and stores `sha256(secret)` |
 | `powProgress` | `{id, bits, next}` saved puzzle progress |
 | `pendingForget` | `[{server, secret}]` "delete my votes" requests still to be sent (retried every 5 min) |
+| `categories` | categories added by the sync server (validated with `Argus.cleanCategory`) |
 | `community` / `communityMeta` | the community list / its ETag, count and times (kept apart so a "no change" check doesn't make tabs reload the list) |
 | `syncStatus` | result of the last sync (`sent`, `count`, `uploadError`, `downloadError`) |
 | `sharedList`, `listUrl` | subscribed shared list and its address |
@@ -104,12 +113,19 @@ votes. The button decides, because every export contains both sections.
 **Community snapshot** (`GET /snapshot.json`):
 
 ```json
-{ "v": 1, "generated": 1794000000000, "min": { "votes": 15, "agree": 70 },
+{ "v": 1, "generated": 1794000000000, "min": { "votes": 1, "factor": 2 },
+  "cats": [ { "id": "sponsored", "label": "AD", "title": "sponsored content", "color": "#16a34a" } ],
+  "x": { "@x": { "sponsored": [100, 3] } },
   "c": { "@x": [92, 41, 0, 0, "X"], "UC…": [100, 0, 0, 0, "Y", 1] } }
 ```
 
 Each entry is `[aiPct, aiVotes, pePct, peVotes, "", overrideBits?]` (the fifth slot is always empty: names come from voters and are never published). The vote counts include only votes that counted (weighted, network cap applied). A pct of 0 means not shown.
 In `overrideBits`, 1 means AI was set by the admin and 2 means PE was.
+`c` only ever holds AI/PE entries, in the format every extension version reads. Added categories
+are in `x` (per key, `{<id>: [pct, votes]}`) with their definitions in `cats`; older extensions
+ignore both.
+
+**Vote rule:** a mark is shown when yes ≥ `minVotes` and not ≤ `notFactor` × yes (defaults 1 and 2).
 
 ## Server API
 
@@ -121,8 +137,12 @@ In `overrideBits`, 1 means AI was set by the admin and 2 means PE was.
 | `POST /votes` | `{secret, votes:[{k,f,v,name}], replace?}` (≤ 100) | 200, 400, 401 unknown install, 429 daily limit |
 | `POST /forget` | `{secret}` | 200 |
 | `GET /admin` | none | the moderation dashboard page |
+| `GET /admin/api/state` | `Authorization: Bearer …` | vote rules and categories |
+| `POST /admin/api/rules` | `{minVotes, notFactor, warmupDays, maxPerNet}` | 200, 403 |
+| `POST /admin/api/category` | `{id, label, title, color}` | 200, 400, 403 |
+| `POST /admin/api/category/delete` | `{id}` | 200, 400, 403 |
 | `GET /admin/api/channels` | `?q=&shown=1`, `Authorization: Bearer …` | list with tallies and overrides |
-| `POST /admin/api/override` | `{key, ai, pe, note}` | 200, 400, 403 |
+| `POST /admin/api/override` | `{key, set: {<category>: 1, 0 or null}}` | 200, 400, 403 |
 | `POST /admin/api/purge` | `{key}` | 200, 400, 403 |
 | `POST /admin/rebuild` | `Authorization: Bearer …` | 200 `{changed,total}`, 403 |
 
@@ -130,7 +150,7 @@ All POSTs require `content-type: application/json` and a body of 64 KB or less. 
 
 ## Tests and tooling
 
-`npm test` runs 73 tests: content script on every platform, background, settings page, server
+`npm test` runs 78 tests: content script on every platform, background, settings page, server
 end-to-end against a real local `wrangler dev`, and regression tests for every review finding.
 `npm run test:browser` loads the Chrome build into a real Chrome and checks the service worker,
 the settings page and badges on locally served copies of YouTube, Google, X and Reddit pages. `npm run lint` runs ESLint and

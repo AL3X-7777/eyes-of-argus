@@ -115,13 +115,16 @@ function loadBackground(storage) {
 }
 
 /** Starts `wrangler dev` with a fresh local database. Returns { url, stop, sql }. */
-async function startServer(port = 8790) {
+async function startServer(port = 8790, { schema = 'schema.sql', rules = "('minVotes', '2'), ('warmupDays', '3')", prepare } = {}) {
   const serverDir = path.join(ROOT, 'server');
   const persist = fs.mkdtempSync(path.join(os.tmpdir(), 'argus-'));
   const wrangler = path.join(serverDir, 'node_modules', '.bin', 'wrangler');
   const common = ['--persist-to', persist];
-  execFileSync(wrangler, ['d1', 'execute', 'argus', '--local', ...common, '--file', 'schema.sql'], { cwd: serverDir, stdio: 'ignore' });
-  const vars = { POW_BITS: '10', MIN_VOTES: '2', SALT: 'test-salt', ADMIN_TOKEN: 'test-admin', REG_PER_NET_DAY: '50' };
+  execFileSync(wrangler, ['d1', 'execute', 'argus', '--local', ...common, '--file', path.resolve(serverDir, schema)], { cwd: serverDir, stdio: 'ignore' });
+  // most tests use stricter rules than the defaults (2 yes votes, 3-day warm-up) so thresholds are exercised
+  if (rules) execFileSync(wrangler, ['d1', 'execute', 'argus', '--local', ...common, '--command', `INSERT INTO settings (k, v) VALUES ${rules}`], { cwd: serverDir, stdio: 'ignore' });
+  if (prepare) prepare(command => execFileSync(wrangler, ['d1', 'execute', 'argus', '--local', ...common, '--command', command], { cwd: serverDir, stdio: 'ignore' }));
+  const vars = { POW_BITS: '10', SALT: 'test-salt', ADMIN_TOKEN: 'test-admin', REG_PER_NET_DAY: '50' };
   const args = ['dev', '--port', String(port), '--test-scheduled', '--ip', '127.0.0.1', ...common];
   for (const [k, v] of Object.entries(vars)) args.push('--var', `${k}:${v}`);
   const proc = spawn(wrangler, args, { cwd: serverDir, stdio: ['ignore', 'pipe', 'pipe'] });

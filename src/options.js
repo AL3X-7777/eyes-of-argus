@@ -14,13 +14,15 @@
 
   const api = globalThis.browser ?? globalThis.chrome;
   const A = globalThis.Argus;
-  const { FLAGS, MSG } = A;
+  const { MSG } = A;
   const $ = s => document.querySelector(s);
   const DEFAULTS = { badges: true, tint: true, dim: false };
   /** Firefox asks separately for permission to send data (data_collection_permissions). */
   const IS_FIREFOX = typeof api.runtime.getBrowserInfo === 'function';
 
   let marks = {};
+  /** Categories: the built-in ones plus those the sync server added. */
+  let cats = A.normalizeCategories([]);
   let syncCfg = { enabled: false, server: '' };
 
   /**
@@ -101,7 +103,16 @@
     const q = $('#search').value.trim().toLowerCase();
     const tbody = $('#marks tbody');
     tbody.textContent = '';
-    const all = Object.entries(marks).filter(([, v]) => A.val(v.ai) || A.val(v.pe));
+    const all = Object.entries(marks).filter(([, v]) => cats.some(c => A.val(v[c.id])));
+
+    // one column per category
+    const head = $('#marks thead tr');
+    head.textContent = '';
+    for (const text of ['Channel / account / site', ...cats.map(c => c.label), '']) {
+      const th = document.createElement('th');
+      th.textContent = text;
+      head.append(th);
+    }
     $('#count').textContent = all.length;
     $('#empty').hidden = all.length > 0;
 
@@ -123,14 +134,16 @@
       td.append(a, k);
       tr.append(td);
 
-      for (const flag of FLAGS) {
+      for (const cat of cats) {
+        const flag = cat.id;
         const c = document.createElement('td');
         const sel = document.createElement('select');
         for (const [value, label] of [['0', '–'], ['1', 'Yes'], ['-1', 'Not']]) sel.add(new Option(label, value));
         const cur = A.val(v[flag]);
         sel.value = String(cur);
         sel.className = `${flag} ${cur > 0 ? 'yes' : cur < 0 ? 'no' : ''}`;
-        sel.setAttribute('aria-label', `${flag === 'ai' ? 'Uses AI' : 'Private-equity owned'}: ${name}`);
+        if (cur > 0) sel.style.borderColor = cat.color;
+        sel.setAttribute('aria-label', `${cat.title}: ${name}`);
         sel.addEventListener('change', () => ask({ type: MSG.MARK, key, changes: { [flag]: Number(sel.value) } }));
         c.append(sel); tr.append(c);
       }
@@ -139,7 +152,7 @@
       const x = document.createElement('button');
       x.className = 'x'; x.textContent = '✕';
       x.setAttribute('aria-label', `Remove mark for ${name}`);
-      x.addEventListener('click', () => ask({ type: MSG.MARK, key, changes: { ai: 0, pe: 0 } }));
+      x.addEventListener('click', () => ask({ type: MSG.MARK, key, changes: Object.fromEntries(cats.map(c => [c.id, 0])) }));
       del.append(x); tr.append(del);
 
       frag.append(tr);
@@ -268,11 +281,13 @@
   function buildExport() {
     const channels = {}, mine = {};
     for (const [k, v] of Object.entries(marks)) {
-      const ai = A.val(v.ai), pe = A.val(v.pe);
-      if (!ai && !pe) continue;
+      const vals = Object.fromEntries(cats.map(c => [c.id, A.val(v[c.id])]));
+      if (!Object.values(vals).some(Boolean)) continue;
       const name = v.name || k;
-      if (ai > 0 || pe > 0) channels[k] = { ai: ai > 0, pe: pe > 0, name };
-      mine[k] = { ai, pe, name, ...(v.uc ? { uc: v.uc } : {}), ...(v.src ? { src: v.src } : {}) };
+      const yes = cats.filter(c => vals[c.id] > 0);
+      // ai and pe are always written, so files stay readable by older versions
+      if (yes.length) channels[k] = { ai: vals.ai > 0, pe: vals.pe > 0, ...Object.fromEntries(yes.map(c => [c.id, true])), name };
+      mine[k] = { ...vals, name, ...(v.uc ? { uc: v.uc } : {}), ...(v.src ? { src: v.src } : {}) };
     }
     return { app: 'eyes-of-argus', version: 2, exported: new Date().toISOString(), channels, mine };
   }
@@ -317,15 +332,18 @@
 
   api.storage.onChanged.addListener((ch, area) => {
     if (area !== 'local') return;
-    if (ch.marks) { marks = ch.marks.newValue || {}; render(); }
+    if (ch.categories) cats = A.normalizeCategories(ch.categories.newValue);
+    if (ch.marks) marks = ch.marks.newValue || {};
+    if (ch.marks || ch.categories) render();
     if (ch.sharedList || ch.listUrl) api.storage.local.get(['sharedList', 'listUrl']).then(d => showListInfo(d.sharedList, d.listUrl));
     if (ch.sync || ch.queue || ch.syncStatus || ch.communityMeta || ch.identity || ch.pendingForget) renderSync();
   });
 
   (async () => {
     await loadSettings();
-    const d = await api.storage.local.get(['marks', 'sharedList', 'listUrl', 'everywhere']);
+    const d = await api.storage.local.get(['marks', 'sharedList', 'listUrl', 'everywhere', 'categories']);
     marks = d.marks || {};
+    cats = A.normalizeCategories(d.categories);
     $('#everywhere').checked = !!d.everywhere;
     $('#listUrl').value = d.listUrl || '';
     showListInfo(d.sharedList, d.listUrl);
