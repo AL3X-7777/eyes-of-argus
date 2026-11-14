@@ -8,8 +8,8 @@ Everything you need is in this folder. Both stores need you to sign in and submi
    The automated tests use simulated pages, so this is the one check that only you can do.
 3. Take one real screenshot (1280×800) of YouTube with a badge and the right-click menu open and
    add it to `store/screenshots/`.
-4. Decide whether you run a public sync server. Without one, users can still mark, export, import
-   and subscribe to shared lists; community sync asks them for a server address.
+4. The sync server address is built in (`DEFAULT_SERVER` in `src/shared.js`). Check that
+   `<address>/config` answers before you submit.
 
 ## Chrome Web Store
 1. Register at https://chrome.google.com/webstore/devconsole (one-time $5 fee).

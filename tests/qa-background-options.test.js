@@ -249,3 +249,13 @@ test('QA shared list download: only valid "yes" entries are kept, names cleaned'
   assert.equal(res.count, 2);
   assert.deepEqual(JSON.parse(JSON.stringify(st.data.sharedList.channels)), { 'site:a.com': { ai: true, pe: false, name: '<script>' }, '@ok': { ai: false, pe: true, name: '@ok' } });
 });
+
+test('the built-in sync server is pre-filled and is a valid https address', async () => {
+  require('../src/shared.js');
+  const A = globalThis.Argus;
+  assert.equal(A.serverBase(A.DEFAULT_SERVER), A.DEFAULT_SERVER);
+  const o = optionsPage(fakeStorage({}));
+  await wait(80);
+  assert.equal(o.w.document.querySelector('#syncServer').value, A.DEFAULT_SERVER);
+  assert.equal(o.w.document.querySelector('#syncEnabled').checked, false, 'sync stays off until the user turns it on');
+});

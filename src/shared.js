@@ -58,6 +58,12 @@
     clear: { changes: { ai: 0, pe: 0 }, msg: 'cleared' },
   });
 
+  /**
+   * The community sync server used unless the user enters another one in settings.
+   * Nothing is sent to it until the user turns community sync on.
+   */
+  const DEFAULT_SERVER = 'https://eyes-of-argus.argus-7777.workers.dev';
+
   /** Tunables that client and server must agree on. */
   const LIMITS = Object.freeze({
     /** Highest proof-of-work difficulty the extension will ever attempt. */
@@ -297,7 +303,7 @@
   }
 
   root.Argus = Object.freeze({
-    FLAGS, MSG, LIMITS, ACTIONS,
+    FLAGS, MSG, LIMITS, ACTIONS, DEFAULT_SERVER,
     normalizeKey, isChannelId, keyFromHref, platformOf, labelForKey, nameForKey, urlForKey, siteKey, val, cleanName, serverBase, queueKey,
     isCommunityEntry, toHex, sha256hex, zeroBits,
   });

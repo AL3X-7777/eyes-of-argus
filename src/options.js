@@ -155,7 +155,7 @@
     const d = await api.storage.local.get(['sync', 'queue', 'syncStatus', 'communityMeta', 'identity', 'pendingForget']);
     syncCfg = { enabled: false, server: '', ...(d.sync || {}) };
     $('#syncEnabled').checked = syncCfg.enabled;
-    if (document.activeElement !== $('#syncServer')) $('#syncServer').value = syncCfg.server;
+    if (document.activeElement !== $('#syncServer')) $('#syncServer').value = syncCfg.server || A.DEFAULT_SERVER;
     $('#syncPill').textContent = syncCfg.enabled ? 'On' : 'Off';
     $('#syncPill').classList.toggle('on', syncCfg.enabled);
     if (!syncCfg.enabled) {

@@ -41,12 +41,12 @@
       <h2>Community sync <span id="syncPill" class="pill">Off</span></h2>
       <p class="muted">Share your marks as anonymous votes and see what everyone else marked. A mark shows for everyone once enough people agree. Votes you make offline are sent the next time you're online, and the last community list keeps working offline.</p>
       <label class="row">
-        <span><b>Enable community sync</b><small>No account. Your install gets a random anonymous ID.</small></span>
+        <span><b>Enable community sync</b><small>No account. Your install gets a random anonymous ID. Your browser asks once for permission to reach the sync server below.</small></span>
         <input type="checkbox" class="switch" id="syncEnabled">
       </label>
       <div class="inline">
         <label for="syncServer" class="sr-only">Sync server address</label>
-        <input id="syncServer" type="url" placeholder="https://eyes-of-argus.yourname.workers.dev">
+        <input id="syncServer" type="url" placeholder="https://eyes-of-argus.argus-7777.workers.dev" title="Sync server address. Leave it as it is unless you run your own server.">
         <button id="saveServer">Save address</button>
         <button id="syncNow">Sync now</button>
       </div>

@@ -10,7 +10,7 @@ Optional community sync through a tiny self-hosted server (see `server/README.md
 
 **Firefox (for testing)**
 1. Open `about:debugging#/runtime/this-firefox`
-2. Click **Load Temporary Add-on…** and pick `eyes-of-argus-firefox-0.5.0.zip`
+2. Click **Load Temporary Add-on…** and pick `eyes-of-argus-firefox-0.5.1.zip`
 3. Reload any open YouTube tabs
 
 Temporary add-ons disappear when Firefox restarts. To keep it installed, upload the zip to
@@ -18,7 +18,7 @@ https://addons.mozilla.org/developers/ as **"On your own"** (unlisted). Signing 
 get a signed `.xpi` you can install permanently.
 
 **Chrome / Edge / Brave / Opera**
-1. Unzip `eyes-of-argus-chrome-0.5.0.zip` into a folder
+1. Unzip `eyes-of-argus-chrome-0.5.1.zip` into a folder
 2. Open `chrome://extensions` (or `edge://extensions`), turn on **Developer mode**
 3. Click **Load unpacked** and pick the folder
 
@@ -31,7 +31,7 @@ get a signed `.xpi` you can install permanently.
 - Click the toolbar icon for settings: badges, tinting, fading marked videos, your list of marks
 
 ## Community sync
-Turn it on in settings and enter your sync server address. Votes are queued while you're offline
+Turn it on in settings. The project's sync server is filled in already; you can enter your own instead. Votes are queued while you're offline
 and sent when you're back online. The community list is cached for offline use.
 
 ## Sharing marks without a server
@@ -55,7 +55,7 @@ Edit files in `src/`, then run `python build.py`. Output goes to `dist/`.
 ```
 npm install && (cd server && npm install)
 python build.py      # builds dist/
-npm test             # 72 tests, including a local sync server
+npm test             # 73 tests, including a local sync server
 npm run test:browser # loads the Chrome build into a real Chrome
 npm run lint         # ESLint + Mozilla's add-on linter
 npm run docs         # API reference in docs/api

@@ -130,7 +130,7 @@ All POSTs require `content-type: application/json` and a body of 64 KB or less. 
 
 ## Tests and tooling
 
-`npm test` runs 72 tests: content script on every platform, background, settings page, server
+`npm test` runs 73 tests: content script on every platform, background, settings page, server
 end-to-end against a real local `wrangler dev`, and regression tests for every review finding.
 `npm run test:browser` loads the Chrome build into a real Chrome and checks the service worker,
 the settings page and badges on locally served copies of YouTube, Google, X and Reddit pages. `npm run lint` runs ESLint and

@@ -20,7 +20,7 @@ badges. As on the built-in sites, nothing is recorded or sent.
 file about twice a day. The site hosting the file sees an ordinary download request (including your
 IP address), as with any web page.
 
-**Community sync (optional, off by default).** If you turn it on and enter a sync server address:
+**Community sync (optional, off by default).** If you turn it on, the extension talks to the sync server shown in settings (by default the project's server at `eyes-of-argus.argus-7777.workers.dev`, hosted on Cloudflare and run by the extension's developer; you can enter another one):
 - The extension creates a random anonymous ID. No name, email or account is involved.
 - Your marks are sent to that server as votes: the channel, account or website, the flag (AI or
   PE), yes or no, and the public display name of the channel.
@@ -29,8 +29,8 @@ IP address), as with any web page.
 - The server sees your IP address while handling a request. The reference server does not store IP
   addresses; it stores salted hashes of the network for rate limiting and for limiting how many
   votes from one network count.
-- The sync server is operated by whoever runs the address you entered. Their handling of the data
-  is their responsibility.
+- If you enter a different server address, that server is operated by whoever runs it, and their
+  handling of the data is their responsibility.
 
 ## Deleting your data
 - Local data: remove marks in the settings page ("Delete all marks") or uninstall the extension.

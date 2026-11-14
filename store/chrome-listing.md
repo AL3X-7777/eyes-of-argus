@@ -61,5 +61,5 @@ Source code: https://github.com/AL3X-7777/eyes-of-argus
 
 **Data usage:** the extension collects nothing by default. With community sync turned on by the
 user, votes (which channel or site, which flag, yes/no) are sent to the server the user entered.
-The closest category in the form is "User activity"; tick it if you operate a public sync server,
+The closest category in the form is "User activity"; tick it, since the extension now ships with your public sync server as the default,
 and certify the three statements (no selling, no unrelated use, no creditworthiness use).
